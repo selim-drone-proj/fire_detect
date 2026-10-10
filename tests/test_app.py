@@ -115,3 +115,95 @@ def test_systemd_notify(tmp_path, monkeypatch):
         pass
     srv.close()
     assert got[0] == "READY=1" and got.count("WATCHDOG=1") == 3 and got[-1] == "STOPPING=1"
+
+
+def test_hidden_heat_scenario_contact_probe_cuts(tmp_path, validate):
+    """열화상에 안 보이는 뒷면 발열을 접촉 프로브가 잡아 충전을 끊는다"""
+    app = simulate(tmp_path, "hidden_heat", 600, reset_at=560)
+    tr = transitions(tmp_path)
+    assert [x[1] for x in tr] == [0, 1, 3, 0], tr
+    t_danger = next(x for x in tr if x[1] == 3)
+    assert 250 <= t_danger[0] <= 260 and t_danger[2] and not t_danger[3]
+    assert tr[-1][0] == 560 and tr[-1][3]
+    rows = list(csv.DictReader(open(next(tmp_path.glob("fire_*.csv")), encoding="utf-8")))
+    danger = rows[t_danger[0]]
+    assert float(danger["max_c"]) < 40 and float(danger["probe3_c"]) >= 60            # 열화상은 평온, 프로브 3 이 잡음
+    assert "프로브3" in danger["reason"]
+    assert app.outputs.state["ssr"] == "off"
+    for r in [json.loads(x) for x in next(tmp_path.glob("fire_*.jsonl")).read_text().splitlines()]:
+        assert validate(r) == [], r
+
+
+def test_csv_has_point_sensor_columns_and_rotates_on_change(tmp_path):
+    from fire_detect.alarm import Status
+    from fire_detect.logger import FireLogger
+    stamp = 1791590400.0                                       # 2026-10-10 00:00 UTC
+    old = FireLogger(tmp_path, "ess_01")                       # 예전 형식 (점 센서 열 없음)
+    old.write_status(stamp, Status())
+    old.close()
+    lg = FireLogger(tmp_path, "ess_01", probe_count=3, ir=True)
+    lg.write_status(stamp + 1, Status(probe_c=[25.0, float("nan"), 26.5], ir_object_c=27.25))
+    lg.close()
+    assert (tmp_path / "fire_20261010_1.csv").exists()         # 예전 파일은 옆으로
+    rows = list(csv.DictReader(open(tmp_path / "fire_20261010.csv", encoding="utf-8")))
+    assert len(rows) == 1 and rows[0]["probe1_c"] == "25.00" and rows[0]["probe2_c"] == "" \
+        and rows[0]["ir_c"] == "27.25" and list(rows[0])[-1] == "reason"
+    removed = FireLogger(tmp_path, "ess_01", keep_days=1).cleanup(stamp + 5 * 86400)
+    assert sorted(removed) == ["fire_20261010.csv", "fire_20261010.jsonl", "fire_20261010_1.csv"]
+
+
+def test_missing_probe_is_degraded_not_cut(tmp_path):
+    from fire_detect.simulate import FakeW1
+    cfg = load(None)
+    cfg.reset_file = str(tmp_path / "reset.request")
+    cfg.sensors.ds18b20_ids = list(FakeW1.IDS)                 # 위치를 고정해 둔 설정
+    app, scen = fa.build(cfg, "normal", str(tmp_path), ros=False, log=lambda m: None)
+    w1 = app.hub.slots["DS18B20"].sensor.w1
+    w1.present.remove(w1.IDS[1])                               # 프로브 2 를 뺌
+    fa.run(app, scen, 1.0, 200, 0, None)
+    health = [json.loads(x) for x in next(tmp_path.glob("fire_*.jsonl")).read_text().splitlines()
+              if '"device_health"' in x]
+    last = health[-1]
+    assert last["state"] == fa.STATE_DEGRADED and not last["sensor_ok_mask"] & 8 and last["sensor_ok_mask"] & 1
+    assert "프로브2 안 보임" in last["message"]
+    rows = list(csv.DictReader(open(next(tmp_path.glob("fire_*.csv")), encoding="utf-8")))
+    assert all(r["charge_allowed"] == "1" for r in rows) and int(rows[-1]["flags"]) & 16
+
+
+def test_logger_survives_corrupted_file_and_cleans_only_its_own(tmp_path):
+    from fire_detect.alarm import Status
+    from fire_detect.logger import FireLogger
+    stamp = 1791590400.0                                       # 2026-10-10 UTC
+    (tmp_path / "fire_20261010.csv").write_bytes(b"time_unix,\xed\x95")          # 정전으로 잘린 글자
+    (tmp_path / "notes_20250101.md").write_text("keep")
+    lg = FireLogger(tmp_path, "ess_01", probe_count=3, ir=True)
+    lg.write_status(stamp, Status())                           # 예외 없이
+    lg.close()
+    assert (tmp_path / "fire_20261010_1.csv").exists()
+    assert lg.cleanup(stamp + 100 * 86400) and (tmp_path / "notes_20250101.md").exists()
+
+
+def test_logging_failure_does_not_stop_the_safety_loop(tmp_path):
+    cfg = load(None)
+    cfg.reset_file = str(tmp_path / "reset.request")
+    msgs = []
+    app, scen = fa.build(cfg, "hidden_heat", str(tmp_path), ros=False, log=msgs.append)
+
+    def full(*a):
+        raise OSError(28, "No space left on device")
+    app.logger.write_status = app.logger.write_record = full
+    fa.run(app, scen, 1.0, 300, 0, None)
+    assert app.last.level == 3 and not app.last.charge_allowed            # 기록이 안 돼도 판정, 차단은 계속
+    assert sum("기록 오류" in m for m in msgs) == 1
+
+
+def test_close_stops_probe_reader_thread():
+    from fire_detect.drivers.ds18b20 import ProbeGroup
+    from fire_detect.sensors import SensorHub
+    from fire_detect.simulate import FakeW1, Scenario
+    g = ProbeGroup(FakeW1(Scenario("normal")), threaded=True, period_s=0.01)
+    hub = SensorHub(probes=g)
+    hub.begin()
+    assert g._thread.is_alive()
+    hub.close()
+    assert not g._thread.is_alive()
