@@ -17,8 +17,10 @@
 5. hw_check 는 fire-detect 서비스와 같은 GPIO 를 쓴다. 서비스가 돌고 있으면 사람에게 알리고
    `sudo systemctl stop fire-detect` 후 시험하고, 끝나면 `sudo systemctl start fire-detect`.
    멈춘 동안은 출력이 풀려 충전이 끊긴 상태다 (안전 쪽).
-6. git push, 원격 저장소 설정, SSH 설정, 사용자 계정, 디스크 포맷, `rm -rf` 는 하지 않는다.
-   저장소 파일을 고쳤으면 `git diff` 로 보여 주고, 올리는 것은 사람이 한다.
+6. git 은 PR 까지만 한다. 저장소 파일을 고쳤으면 아래 'git 과 PR' 순서대로 새 브랜치에 커밋, push 하고 PR 을 연다.
+   PR 승인과 병합, main 에 직접 push, force push, 브랜치 삭제, 저장소 설정 변경은 사람이 한다.
+   GitHub 인증은 사람이 보드에 넣어 둔 개인 토큰(`gh auth login`)만 쓰고, 토큰 값은 보지도 남기지도 않는다.
+   SSH 설정, 사용자 계정, 디스크 포맷, `rm -rf` 는 하지 않는다.
 7. 재부팅, 배선 연결과 분리, 버튼 누르기, 손이나 따뜻한 물컵을 열화상 앞에 대기 같은 물리 작업은
    사람에게 부탁하고 끝났다는 답을 기다린다. 보드는 눈으로 볼 수 없으므로 추측하지 않는다.
 
@@ -68,7 +70,7 @@
 12. **동작 확인 (사람과 같이, 안전 규칙 1 상태)**: 손이나 따뜻한 물컵을 열화상 앞에 두면 단계가 1, 2 로 오르고
     LED 와 부저가 바뀌는지, `journalctl -u fire-detect -f` 로 본다. 위험 래치가 걸렸으면 버튼 2 초나 `.venv/bin/fire-detect --reset` 으로 푼다.
 13. **기록**: `~/fire_logs` 에 `fire_*.csv`, `thermal_*.csv`, `fire_*.jsonl` 이 생기는지 확인한다.
-14. **마무리 보고**: 단계별 결과, 바꾼 시스템 파일 목록(.bak 경로 포함), 남은 문제를 정리해 보여 준다.
+14. **마무리 보고**: 단계별 결과, 바꾼 시스템 파일 목록(.bak 경로 포함), 저장소를 고쳤으면 PR 주소, 남은 문제를 정리해 보여 준다.
 
 ## 자주 걸리는 것
 
@@ -79,6 +81,34 @@
 - 시각: 기록은 UTC. `timedatectl` 의 NTP 동기화가 no 이면 기록에 TIME_UNSYNCED 가 붙는다.
   Pi 5 RTC 백업 전지가 공식 충전식이면 `dtparam=rtc_bbat_vchg=3000000` 으로 충전을 켠다 (충전식이 아니면 켜지 않음, 안전 규칙 3).
 - 기준값(8 ℃, 60 ℃, 0.3 V)은 임시값이다. 며칠 정상 충전 기록을 모은 뒤 `tools/analyze_log.py` 로 사람이 정한다 (README 5장).
+
+## git 과 PR
+
+저장소 파일(코드, 문서, `config.example.yaml` 등)을 고쳤을 때만 한다. `/etc`, `/boot` 같은 보드의 시스템 파일은
+저장소 밖이라 PR 대상이 아니다. 거기서 알게 된 것을 저장소에 남겨야 하면 README 나 예시 설정을 고치는 PR 로 한다.
+
+1. 시작 전: `git -C ~/fire_detect fetch origin` 후 `git switch -c board/<YYYYMMDD>-<짧은 설명> origin/main`.
+   이미 그 작업용 브랜치에 있으면 그대로 쓴다. main 에서 직접 커밋하지 않는다.
+2. 고친 뒤: `.venv/bin/python -m pytest -q tests` 가 통과해야 커밋한다. 커밋 메시지는 한국어로, 무엇을 왜 바꿨는지 쓴다.
+3. 올리기: `git push -u origin <브랜치>` 후
+   `gh pr create --base main --title "<한 줄 요약>" --body "<바꾼 것, 보드에서 확인한 것(hw_check, pytest 결과), 남은 문제>"`.
+   보드에서 확인을 다 못 했으면 `--draft` 로 연다.
+4. 끝나면 PR 주소를 사람에게 보여 준다. `gh pr merge`, `gh pr review --approve`, `git push origin main`, `git push --force`,
+   `git push --delete`, `gh repo edit` 는 쓰지 않는다.
+5. 인증이 안 돼 있으면(`gh auth status` 실패) 직접 고치려 하지 말고 사람에게 아래 'GitHub 인증'을 부탁한다.
+   `gh auth token`, `~/.config/gh/hosts.yml`, `~/.git-credentials` 처럼 토큰을 보여 주는 명령이나 파일은 열지 않는다.
+
+## GitHub 인증 (사람이 보드에서 한 번)
+
+1. GitHub 웹 → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.
+   Resource owner 는 `selim-drone-proj`, Repository access 는 `fire_detect` 만 (필요하면 다른 저장소 추가),
+   Permissions 는 Contents: Read and write, Pull requests: Read and write. 만료는 90 일 정도.
+   조직 설정에 따라 조직 관리자의 토큰 승인이 필요할 수 있다.
+2. 보드에서: `sudo apt install -y gh` 후 `gh auth login` → GitHub.com → HTTPS → Paste an authentication token 에 붙여 넣기,
+   그다음 `gh auth setup-git` (git push 도 같은 토큰을 씀), `gh auth status` 로 확인.
+   토큰은 보드 터미널에만 입력하고 채팅, 파일, 커밋에는 넣지 않는다.
+3. 권장: 저장소 Settings → Branches (또는 Rules) 에서 main 에 "PR 필수, 승인 1 명, force push 금지"를 걸고 관리자도 예외 없이 둔다.
+   그러면 토큰이 있어도 승인 없이는 main 이 바뀌지 않는다.
 
 ## 나중에 (지금 세팅 범위 밖)
 
