@@ -13,7 +13,8 @@
 3. `/boot/firmware/config.txt`, systemd 유닛, udev 규칙, `/etc/fire-detect/config.yaml` 을 바꾸기 전에
    바꿀 내용을 보여 주고 확인받는다. 바꾸는 파일은 먼저 `<파일>.bak` 으로 복사해 둔다.
 4. 판정 기준(`alarm:` 의 값 전부, 특히 `cut_level`, `latch_danger`, `sensor_loss_cut_s`, `start_hold_s`)과
-   서비스의 `WatchdogSec`, `Restart`, `ExecStartPre`, `ExecStopPost`, `StateDirectory` 는 바꾸지 않는다.
+   서비스의 `WatchdogSec`, `WatchdogSignal`, `Restart`, `ExecStartPre`, `ExecStopPost`, `StateDirectory`,
+   `WorkingDirectory`, `Environment` 는 바꾸지 않는다.
    위험 래치 파일 `/var/lib/fire-detect/latched` 를 지우지 않는다 (해제는 사람이 버튼이나 `fire-detect --reset` 으로).
    바꿔야 할 것 같으면 이유를 적어 사람에게 넘긴다.
 5. hw_check 는 fire-detect 서비스와 같은 GPIO 를 쓴다. 서비스가 돌고 있으면 사람에게 알리고
@@ -81,6 +82,8 @@
 11. **서비스**: `sudo cp systemd/fire-detect.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now fire-detect`,
     `systemctl status fire-detect` 가 active (running), `journalctl -u fire-detect -n 50` 에 시작 문구가 있고 오류가 없어야 한다.
     `cat /sys/module/pinctrl_rp1/parameters/persist_gpio_outputs` 가 N 이어야 한다 (파일이 없으면 그 커널에는 이 설정이 없다는 뜻이니 보고만 한다).
+    journal 에 "GPIO 출력 없이 동작" 이 있으면 실패다 (충전을 켤 수 없음). 서비스 파일이 저장소 것과 같은지,
+    `id pi` 에 gpio 그룹이 있는지 확인하고 사람에게 보고한다.
 12. **동작 확인 (사람과 같이, 안전 규칙 1 상태)**: 손이나 따뜻한 물컵을 열화상 앞에 두면 단계가 1, 2 로 오르고
     LED 와 부저가 바뀌는지, `journalctl -u fire-detect -f` 로 본다. 접촉 프로브 하나를 손으로 쥐거나 적외선 앞에 손을 대면
     주의(1)로 오르고 이유에 그 프로브나 적외선이 나와야 한다. 위험 래치가 걸렸으면 버튼 2 초나 `.venv/bin/fire-detect --reset` 으로 푼다.

@@ -61,7 +61,8 @@
 **안전 쪽 설계.** SSR 과 릴레이는 "통전해야 충전" 입니다. 켠 뒤 10 초는 끊어 두고, 프로그램이 끝나면 출력을 끕니다.
 프로그램이 멈추거나(systemd watchdog 10 초) 죽어도 systemd 가 `fire-detect --safe-off` 로 출력을 끄고 다시 시작합니다.
 Pi 5 커널은 프로세스가 죽어도 GPIO 출력을 그대로 두는 설정(`pinctrl_rp1` 의 `persist_gpio_outputs`)이 기본으로 켜져 있어,
-서비스가 시작할 때 이것을 끕니다 (`systemd/fire-detect.service` 의 ExecStartPre, ExecStopPost). Pi 전원이 나가면 출력이 풀려 끊깁니다.
+서비스가 시작할 때 이것을 끕니다 (`systemd/fire-detect.service` 의 ExecStartPre, ExecStopPost). watchdog 은 SIGKILL 로 바로 끝냅니다.
+Pi 전원이 나가면 출력이 풀려 끊깁니다. GPIO 를 열지 못하면 감시와 기록만 하고 충전은 켜지 않으며 DeviceHealth 가 ERROR 입니다.
 SSR 이 끊는 것은 감지기 자신의 전원이 아니라 감시 대상 파워뱅크의 충전 라인입니다.
 
 전원과 GND 핀 (예): 핀 1 (3.3 V) I2C 센서 5 개, 핀 17 (3.3 V) DS18B20 과 4.7 kΩ, 핀 2 (5 V) MQ-2,

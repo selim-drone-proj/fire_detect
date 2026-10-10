@@ -8,7 +8,10 @@
 # GPIO 출력을 그대로 두는 설정(pinctrl_rp1 persist_gpio_outputs)이 기본이라 ExecStartPre 가 그것을 끈다.
 # 그래서 재시작되는 동안 SSR, 릴레이가 떨어져 충전은 끊긴 쪽으로 간다.
 # 위험 래치는 /var/lib/fire-detect/latched (StateDirectory) 에 남아 재시작, 재부팅 뒤에도 이어진다.
-# 아래 WatchdogSec, Restart, ExecStartPre, ExecStopPost 는 안전 장치라 바꾸지 않는다.
+# watchdog 은 SIGKILL 로 바로 죽인다 (SIGABRT 는 코어 덤프를 쓰는 동안 출력을 붙잡고 있을 수 있음).
+# lgpio 는 작업 폴더(또는 LG_WD)에 알림 파이프를 만들므로 pi 가 쓸 수 있고 ExecStopPost 때도 남아 있는
+# StateDirectory 를 준다. 못 만들면 GPIO 를 못 연다.
+# 아래 WatchdogSec, WatchdogSignal, Restart, ExecStartPre, ExecStopPost, Environment, WorkingDirectory 는 바꾸지 않는다.
 [Unit]
 Description=ESS 충전 과열 감시 (fire_detect, ess_01)
 After=multi-user.target
@@ -21,12 +24,16 @@ Group=pi
 SupplementaryGroups=i2c gpio
 RuntimeDirectory=fire-detect
 StateDirectory=fire-detect
-ExecStartPre=-+/bin/sh -c 'test -w /sys/module/pinctrl_rp1/parameters/persist_gpio_outputs && echo N > /sys/module/pinctrl_rp1/parameters/persist_gpio_outputs || true'
+WorkingDirectory=/var/lib/fire-detect
+Environment=LG_WD=/var/lib/fire-detect
+Environment=GPIOZERO_PIN_FACTORY=lgpio
+ExecStartPre=-+/bin/sh -c 'if [ -e /sys/module/pinctrl_rp1/parameters/persist_gpio_outputs ]; then echo N > /sys/module/pinctrl_rp1/parameters/persist_gpio_outputs || echo "경고: persist_gpio_outputs 를 끄지 못함" >&2; fi'
 ExecStart=/home/pi/fire_detect/.venv/bin/fire-detect --config /etc/fire-detect/config.yaml
 ExecStopPost=-/home/pi/fire_detect/.venv/bin/fire-detect --safe-off --config /etc/fire-detect/config.yaml
 Restart=always
 RestartSec=2
 WatchdogSec=10
+WatchdogSignal=SIGKILL
 TimeoutStopSec=5
 
 [Install]

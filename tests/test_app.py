@@ -218,12 +218,16 @@ def test_close_stops_probe_reader_thread():
 
 # ------------------------------------------------------------------ 안전 쪽 동작 (래치 유지, 비상 끄기, 서비스 파일)
 def test_danger_latch_survives_restart(tmp_path):
-    app = simulate(tmp_path, "overheat", 300)                  # 254 초에 위험 래치
     latch = tmp_path / "latched"
+    cfg = load(None)
+    cfg.reset_file = str(tmp_path / "reset.request")
+    app, scen = fa.build(cfg, "overheat", str(tmp_path), ros=False, log=lambda m: None, latch_file=str(latch))
+    fa.run(app, scen, 1.0, 300, 0, None)                         # 254 초에 위험 래치
     assert app.last.latched and latch.exists() and "60" in json.loads(latch.read_text())["reason"]
     cfg = load(None)
     cfg.reset_file = str(tmp_path / "reset.request")
-    app2, scen2 = fa.build(cfg, "normal", str(tmp_path), ros=False, log=lambda m: None)   # 다시 시작 (식은 상태)
+    app2, scen2 = fa.build(cfg, "normal", str(tmp_path), ros=False, log=lambda m: None,
+                           latch_file=str(latch))               # 다시 시작 (식은 상태)
     s = app2.step()
     assert s.level == 3 and s.latched and not s.charge_allowed and "재시작 전" in s.reason
     Path(cfg.reset_file).touch()                                 # 원인 확인 뒤 해제
@@ -242,8 +246,12 @@ def test_safe_off_closes_outputs_and_refuses_unknown_config(tmp_path):
 
         def close(self):
             self.closed = True
-    assert fa.safe_off(None, log=lambda m: None, make_outputs=Fake) == 0
+    good = tmp_path / "good.yaml"
+    good.write_text("pins:\n  ssr: 17\n", encoding="utf-8")
+    assert fa.safe_off(str(good), log=lambda m: None, make_outputs=Fake) == 0
     assert made[-1].closed and made[-1].pins.ssr == 17
+    if not os.path.exists(fa.DEFAULT_CONFIG):
+        assert fa.safe_off(None, log=lambda m: None, make_outputs=Fake) == 1 and len(made) == 1   # 설정 없으면 안 건드림
     bad = tmp_path / "bad.yaml"
     bad.write_text("pins:\n  sssr: 17\n", encoding="utf-8")         # 오타
     assert fa.safe_off(str(bad), log=lambda m: None, make_outputs=Fake) == 1 and len(made) == 1   # 핀을 안 건드림
@@ -253,6 +261,36 @@ def test_service_file_keeps_failsafe_lines():
     unit = (ROOT / "systemd" / "fire-detect.service").read_text(encoding="utf-8")
     lines = [x.strip() for x in unit.splitlines() if not x.strip().startswith("#")]
     assert "WatchdogSec=10" in lines and "Restart=always" in lines and "StateDirectory=fire-detect" in lines
+    assert "WatchdogSignal=SIGKILL" in lines and "Environment=GPIOZERO_PIN_FACTORY=lgpio" in lines
+    assert "Environment=LG_WD=/var/lib/fire-detect" in lines and "WorkingDirectory=/var/lib/fire-detect" in lines
+    assert not any("%" in x for x in lines if x.startswith("Exec"))     # % 는 systemd 지정자
     assert any(x.startswith("ExecStopPost=") and "--safe-off" in x for x in lines)
     assert any(x.startswith("ExecStartPre=") and "persist_gpio_outputs" in x and "echo N" in x and "$" not in x
                for x in lines)                                    # $ 는 systemd 가 먼저 바꿔 버림
+
+
+def test_simulation_does_not_carry_latch_between_runs(tmp_path):
+    simulate(tmp_path, "overheat", 300)                         # 래치가 걸린 채 끝남
+    assert not (tmp_path / "latched").exists()                  # 시뮬레이션은 래치 파일을 남기지 않음
+    app = simulate(tmp_path, "normal", 20)
+    assert app.last.level == 0 and not app.last.latched
+
+
+def test_unopened_gpio_is_reported_as_error(tmp_path):
+    cfg = load(None)
+    app, scen = fa.build(cfg, "normal", str(tmp_path), ros=False, log=lambda m: None)
+    app.gpio_ok = False                                          # 실제 장비에서 GPIO 를 못 연 경우
+    h = app.health(0.0)
+    assert h["state"] == fa.STATE_ERROR and "GPIO" in h["message"]
+
+
+def test_latch_file_unreadable_counts_as_latched(tmp_path, monkeypatch):
+    cfg = load(None)
+    cfg.reset_file = str(tmp_path / "reset.request")
+    app, scen = fa.build(cfg, "normal", str(tmp_path), ros=False, log=lambda m: None, latch_file=str(tmp_path / "l"))
+
+    def deny(self):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(Path, "exists", deny)
+    app2 = fa.FireApp(app.cfg, app.hub, app.outputs, None, clock=lambda: scen.t, log=lambda m: None)
+    assert app2.engine.latched                                   # 알 수 없으면 걸린 것으로 (안전 쪽)
