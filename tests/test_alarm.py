@@ -1,0 +1,146 @@
+"""판정 로직: 단계, 히스테리시스, 래치, 연기 기준선, 센서 끊김"""
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from fire_detect import alarm as al  # noqa: E402
+from fire_detect.alarm import AlarmConfig, AlarmEngine, Frame  # noqa: E402
+
+AMB = 24.0
+
+
+def frame(t, hot=(), temp=None, ambient=AMB, smoke=0.80, pixels=True):
+    """hot 에 적은 화소만 temp ℃, 나머지는 주변 + 1 ℃"""
+    if not pixels:
+        return Frame(t, None, ambient, 45.0, smoke)
+    px = [AMB + 1.0] * 64
+    for i in hot:
+        px[i] = temp
+    return Frame(t, px, ambient, 45.0, smoke)
+
+
+def run(eng, frames):
+    return [eng.update(f) for f in frames]
+
+
+def cfg(**kw):
+    base = dict(smoke_warmup_s=0.0, confirm_s=2.0, clear_s=10.0)
+    base.update(kw)
+    return AlarmConfig(**base)
+
+
+def test_constants_match_msg_file():
+    msgspec_dir = ROOT.parent / "moving-ver" / "tools"
+    if not msgspec_dir.exists():
+        pytest.skip("moving-ver 가 옆에 없음")
+    sys.path.insert(0, str(msgspec_dir))
+    import msgspec
+    m = msgspec.load_all()["FireStatus"]
+    for c in m.consts:
+        assert getattr(al, c.name) == c.value, c.name
+    names = [f.name for f in m.fields if f.name != "header"]
+    assert list(al.Status.MSG_FIELDS) == names
+
+
+def test_normal_stays_normal():
+    eng = AlarmEngine(cfg())
+    s = run(eng, [frame(t) for t in range(30)])[-1]
+    assert s.level == 0 and s.charge_allowed and not s.buzzer_on and s.hot_pixels == 0
+    assert s.hotspot_index in range(64) and s.surface_max_c == AMB + 1
+
+
+def test_single_noisy_frame_is_ignored():
+    eng = AlarmEngine(cfg())
+    run(eng, [frame(t) for t in range(5)])
+    s = eng.update(frame(5, hot=[10], temp=AMB + 12))           # 한 프레임만 튐
+    s = eng.update(frame(6))
+    assert s.level == 0
+
+
+def test_levels_rise_after_confirm_time():
+    eng = AlarmEngine(cfg())
+    run(eng, [frame(t) for t in range(5)])
+    ss = run(eng, [frame(t, hot=[27], temp=AMB + 10) for t in range(5, 9)])
+    assert [s.level for s in ss] == [0, 0, 1, 1]               # 5 초부터 조건, 7 초에 2 초 지남
+    assert ss[-1].hot_pixels == 1 and ss[-1].hotspot_index == 27
+    ss = run(eng, [frame(t, hot=[26, 27, 28], temp=AMB + 10) for t in range(9, 12)])
+    assert ss[-1].level == 2 and ss[-1].buzzer_on and ss[-1].charge_allowed
+
+
+def test_abs_limit_is_danger_latched_and_cuts():
+    eng = AlarmEngine(cfg())
+    ss = run(eng, [frame(t, hot=[0], temp=61.0) for t in range(4)])
+    s = ss[-1]
+    assert s.level == 3 and s.latched and not s.charge_allowed and not s.dc_allowed
+    # 식어도 래치 유지
+    ss = run(eng, [frame(t) for t in range(4, 40)])
+    assert ss[-1].level == 3 and ss[-1].latched and not ss[-1].charge_allowed
+
+
+def test_reset_only_when_condition_cleared():
+    eng = AlarmEngine(cfg())
+    run(eng, [frame(t, hot=[0], temp=61.0) for t in range(4)])
+    eng.request_reset()
+    s = eng.update(frame(4, hot=[0], temp=61.0))                # 아직 뜨거움 -> 무시
+    assert s.latched and "무시" in s.reason
+    eng.request_reset()
+    s = eng.update(frame(5))
+    assert not s.latched and s.level == 0 and s.charge_allowed
+
+
+def test_hysteresis_and_clear_time():
+    eng = AlarmEngine(cfg())
+    run(eng, [frame(t, hot=[5], temp=AMB + 10) for t in range(4)])
+    assert eng.level == 1
+    # 기준(주변+8) 바로 아래, 히스테리시스(1.5) 안쪽 -> 유지
+    ss = run(eng, [frame(t, hot=[5], temp=AMB + 7.0) for t in range(4, 30)])
+    assert ss[-1].level == 1
+    # 충분히 식음 -> clear_s(10 초) 뒤 정상
+    ss = run(eng, [frame(t, hot=[5], temp=AMB + 5.0) for t in range(30, 45)])
+    assert [s.level for s in ss].index(0) == 10
+
+
+def test_smoke_detection_and_baseline():
+    eng = AlarmEngine(cfg(smoke_warmup_s=60.0))
+    ss = run(eng, [frame(t, smoke=0.50 + 0.005 * t) for t in range(60)])     # 예열 중 천천히 변함
+    assert all(s.flags & al.FLAG_SMOKE_WARMUP for s in ss) and ss[-1].level == 0
+    assert ss[-1].smoke_baseline_v == pytest.approx(0.795, abs=0.06)
+    ss = run(eng, [frame(t, smoke=0.80) for t in range(60, 120)])
+    base = ss[-1].smoke_baseline_v
+    ss = run(eng, [frame(t, smoke=base + 0.35) for t in range(120, 124)])
+    assert ss[-1].smoke_detected and ss[-1].level == 3 and not ss[-1].charge_allowed
+    assert ss[-1].smoke_baseline_v == pytest.approx(base, abs=1e-6)          # 경보 중엔 기준 고정
+
+
+def test_ambient_falls_back_to_min_pixel():
+    eng = AlarmEngine(cfg())
+    s = eng.update(Frame(0.0, [30.0] * 63 + [20.0], None, None, 0.8))
+    assert s.flags & al.FLAG_SHT_INVALID and s.ambient_temp_c == 20.0
+    assert s.hot_pixels == 63
+
+
+def test_sensor_loss_cuts_charging_after_timeout():
+    eng = AlarmEngine(cfg(sensor_loss_cut_s=10.0))
+    run(eng, [frame(t) for t in range(5)])
+    ss = run(eng, [frame(t, pixels=False) for t in range(5, 20)])
+    assert all(s.flags & al.FLAG_AMG_INVALID for s in ss)
+    assert ss[4].charge_allowed and not ss[-1].charge_allowed and ss[-1].fault
+    assert ss[-1].hotspot_index == 255 and math.isnan(ss[-1].surface_max_c)
+    s = eng.update(frame(20))
+    assert s.charge_allowed and not s.fault
+
+
+def test_missing_adc_does_not_alarm():
+    eng = AlarmEngine(cfg())
+    ss = run(eng, [Frame(t, [AMB] * 64, AMB, 45.0, None) for t in range(10)])
+    assert ss[-1].flags & al.FLAG_ADC_INVALID and ss[-1].level == 0
+
+
+def test_config_rejects_typos():
+    with pytest.raises(KeyError):
+        AlarmConfig.from_dict({"delta": 5})

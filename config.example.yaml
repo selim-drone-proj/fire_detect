@@ -1,0 +1,52 @@
+# 화재 감지기 ess_01 설정 예시. /etc/fire-detect/config.yaml 로 복사해서 고친다.
+# 적지 않은 항목은 기본값 (fire_detect/config.py). 모르는 항목을 적으면 시작할 때 오류로 알려 준다.
+
+device_id: ess_01
+i2c_bus: 1                      # /dev/i2c-1 (40핀 3번 SDA, 5번 SCL)
+period_s: 1.0                   # 판정 주기
+health_period_s: 10.0
+reset_file: /run/fire-detect/reset   # fire-detect --reset 이 이 파일을 만든다
+
+sensors:
+  amg8833_address: 0x69         # 8x8 열화상 (AD_SELECT 를 GND 에 묶었으면 0x68)
+  sht31_address: 0x44           # 주변 온습도
+  ads1115_address: 0x48         # MQ-2 연기 아날로그 (ADS1115 는 3.3 V 로 켤 것)
+  smoke_channel: 0              # A0
+  smoke_divider: 1.5            # MQ-2 AO -> 10 kΩ -> A0 -> 20 kΩ -> GND 분압이면 1.5
+  retry_s: 10.0                 # 끊긴 센서 다시 연결 시도 간격
+
+alarm:                          # 아래 값은 임시. 정상 충전 로그로 tools/analyze_log.py 를 돌려 다시 정할 것
+  delta_c: 8.0                  # 뜨거운 화소: 주변 온도 + 8 ℃ 초과
+  hysteresis_c: 1.5
+  warning_pixels: 3             # 뜨거운 화소 3 개 이상이면 경고
+  abs_limit_c: 60.0             # 어느 화소든 60 ℃ 이상이면 위험 (충전 차단)
+  smoke_dv: 0.30                # MQ-2 가 기준보다 0.3 V 오르면 연기
+  smoke_warmup_s: 180.0         # MQ-2 예열 동안 연기 판정 끔
+  smoke_tau_s: 600.0
+  confirm_s: 2.0                # 올라갈 때 2 초 유지되어야
+  clear_s: 10.0                 # 내려갈 때 10 초 유지되어야
+  latch_danger: true            # 위험은 사람이 해제할 때까지 유지
+  cut_level: 3                  # 3 = 위험에서만 차단. 2 로 하면 경고에서도 차단
+  sensor_loss_cut_s: 10.0       # 열화상 끊김 10 초면 충전 차단 (감시 불가)
+
+pins:                           # BCM 번호. -1 이면 안 씀
+  ssr: 17                       # (핀 11) AC 충전 라인 SSR
+  dc_relay: 27                  # (핀 13) DC 차단 릴레이 (NO 접점에 결선)
+  buzzer: 22                    # (핀 15)
+  led_red: 5                    # (핀 29)
+  led_yellow: 6                 # (핀 31)
+  led_green: 13                 # (핀 33)
+  reset_button: 26              # (핀 37) GND 로 누르는 버튼, 2 초 길게 누르면 래치 해제
+  relay_active_low: true        # 릴레이 모듈이 IN=Low 에서 붙으면 true
+  ssr_active_low: false
+  buzzer_active_low: false
+
+log:
+  dir: ~/fire_logs
+  jsonl_every_s: 10.0
+  thermal: true                 # thermal_YYYYmmdd.csv (하루 약 30 MB)
+  keep_days: 60
+
+display:
+  enabled: true                 # SSD1306 OLED. 없으면 자동으로 꺼짐
+  address: 0x3C
