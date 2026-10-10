@@ -24,6 +24,8 @@ from .alarm import FLAG_SIMULATED, FLAG_TIME_UNSYNCED, LEVEL_NAMES, AlarmEngine,
 from .config import Config, load
 from .drivers.ads1115 import ADS1115
 from .drivers.amg8833 import AMG8833
+from .drivers.ds18b20 import ProbeGroup
+from .drivers.mlx90614 import MLX90614
 from .drivers.sht31 import SHT31
 from .logger import FireLogger
 from .odor_json import record
@@ -119,8 +121,14 @@ class FireApp:
         prev = self.last
         self.last = s
         if prev is None or (prev.level, prev.latched, prev.fault) != (s.level, s.latched, s.fault):
+            points = ""
+            probes = [v for v in s.probe_c if v == v]
+            if probes:
+                points += f"프로브 최고 {max(probes):.1f}℃ "
+            if s.ir_object_c == s.ir_object_c:
+                points += f"적외선 {s.ir_object_c:.1f}℃ "
             self.log(f"[{LEVEL_NAMES[s.level]}{' 래치' if s.latched else ''}{' 감시불가' if s.fault else ''}] "
-                     f"최고 {s.surface_max_c:.1f}℃ 주변 {s.ambient_temp_c:.1f}℃ 연기 {s.smoke_v:.2f}V "
+                     f"최고 {s.surface_max_c:.1f}℃ 주변 {s.ambient_temp_c:.1f}℃ {points}연기 {s.smoke_v:.2f}V "
                      f"충전 {'허용' if s.charge_allowed else '차단'} {s.reason}")
         rec = self.logger.write_status(stamp, s) if self.logger else None
         if self.ros:
@@ -142,6 +150,7 @@ class FireApp:
 
     def close(self):
         self.outputs.close()
+        self.hub.close()
         if self.logger:
             self.logger.close()
         if self.display:
@@ -158,17 +167,21 @@ def build(cfg: Config, simulate: str | None, out: str | None, ros: bool, log=pri
     sc = cfg.sensors
     scen = None
     if simulate:
-        from .simulate import Scenario, make_bus
+        from .simulate import FakeW1, Scenario, make_bus
         scen = Scenario(simulate)
-        bus = make_bus(scen, sc.amg8833_address, sc.sht31_address, sc.ads1115_address, sc.smoke_divider)
+        bus = make_bus(scen, sc.amg8833_address, sc.sht31_address, sc.ads1115_address, sc.smoke_divider,
+                       sc.mlx90614_address)
+        w1, threaded = FakeW1(scen), False                      # 가짜 1-Wire 는 바로 답하므로 스레드 없이
         clock = lambda: scen.t                                  # noqa: E731  가상 시계 (1 단계 = 1 초)
         start_wall = time.time()
         wall = lambda: start_wall + scen.t                      # noqa: E731
         outputs = FakeOutputs()
         sleep = lambda s: None                                  # noqa: E731
     else:
+        from .drivers.ds18b20 import W1Sysfs
         from .drivers.i2c_bus import SMBus2Bus
         bus = SMBus2Bus(cfg.i2c_bus)
+        w1, threaded = W1Sysfs(), True                          # 프로브 하나 읽는 데 0.75 초: 별도 스레드
         clock, wall, sleep = time.monotonic, time.time, time.sleep
         try:
             from .outputs import GpioOutputs
@@ -177,9 +190,13 @@ def build(cfg: Config, simulate: str | None, out: str | None, ros: bool, log=pri
             log(f"GPIO 출력 없이 동작 (감시, 기록만): {e}")
             outputs = FakeOutputs()
 
+    probes = None
+    if sc.ds18b20_ids or sc.ds18b20_count > 0:
+        probes = ProbeGroup(w1, sc.ds18b20_ids, sc.ds18b20_count, threaded=threaded, clock=clock, log=log)
+    ir = MLX90614(bus, sc.mlx90614_address) if sc.mlx90614_address >= 0 else None
     hub = SensorHub(AMG8833(bus, sc.amg8833_address, sleep=sleep), SHT31(bus, sc.sht31_address, sleep=sleep),
                     ADS1115(bus, sc.ads1115_address, sleep=sleep), sc.smoke_channel, sc.smoke_divider,
-                    sc.retry_s, clock=clock, log=log)
+                    sc.retry_s, clock=clock, log=log, probes=probes, ir=ir)
     display = None
     if cfg.display.enabled and not simulate:
         try:
@@ -187,7 +204,8 @@ def build(cfg: Config, simulate: str | None, out: str | None, ros: bool, log=pri
             display = OledDisplay(cfg.i2c_bus, cfg.display.address)
         except Exception as e:
             log(f"OLED 표시 없이 동작: {e}")
-    logger = FireLogger(out or cfg.log.dir, cfg.device_id, cfg.log.jsonl_every_s, cfg.log.thermal, cfg.log.keep_days)
+    logger = FireLogger(out or cfg.log.dir, cfg.device_id, cfg.log.jsonl_every_s, cfg.log.thermal, cfg.log.keep_days,
+                        probe_count=probes.count if probes else 0, ir=ir is not None)
     bridge = None
     if ros:
         from .ros_bridge import RosBridge
@@ -234,7 +252,7 @@ def run(app: FireApp, scen, period_s: float, duration_s: float | None, speed: fl
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="fire-detect", description="소형 ESS 충전 과열 감시 (ess_01)")
     ap.add_argument("--config", help="설정 YAML (없으면 기본값)")
-    ap.add_argument("--simulate", choices=["overheat", "normal", "sensor_loss"], help="가짜 센서로 실행")
+    ap.add_argument("--simulate", choices=["overheat", "normal", "sensor_loss", "hidden_heat"], help="가짜 센서로 실행")
     ap.add_argument("--speed", type=float, default=1.0, help="시뮬레이션 배속 (0 = 기다리지 않음)")
     ap.add_argument("--duration", type=float, help="이 초만큼만 실행 (시뮬레이션은 가상 시간)")
     ap.add_argument("--reset-at", type=float, help="시뮬레이션에서 이 시각(초)에 래치 해제 버튼을 누름")

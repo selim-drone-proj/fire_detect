@@ -2,16 +2,21 @@
 alarm.py - 과열, 연기 판정 (하드웨어와 무관한 순수 로직. tests/test_alarm.py 로 검증)
 
 입력 (1 초마다 Frame 하나)
-  pixels     AMG8833 화소 64 개 ℃ (못 읽었으면 None)
-  ambient_c  SHT31 주변 온도 ℃ (못 읽었으면 None -> 화소 최저값으로 대신)
-  smoke_v    MQ-2 출력 전압 V (못 읽었으면 None)
+  pixels       AMG8833 화소 64 개 ℃ (못 읽었으면 None)
+  ambient_c    SHT31 주변 온도 ℃ (못 읽었으면 None -> 화소 최저값으로 대신)
+  smoke_v      MQ-2 출력 전압 V (못 읽었으면 None)
+  probes_c     DS18B20 접촉 프로브 ℃ 목록 (프로브를 안 쓰면 None, 못 읽은 프로브는 None)
+  ir_object_c  MLX90614 적외선 물체 ℃ (has_ir 가 거짓이면 안 씀)
 
 단계 (odor_msgs/FireStatus.msg 와 같은 값)
-  0 정상   뜨거운 화소 없음                         녹색
-  1 주의   뜨거운 화소 1~2 개 (국부 발열)           황색
-  2 경고   뜨거운 화소 warning_pixels(3) 개 이상    적색 점멸, 부저 간헐
-  3 위험   연기 감지, 또는 어느 화소든 abs_limit_c  적색 상시, 부저 연속, 충전 차단
+  0 정상   뜨거운 화소도, 뜨거운 점 센서도 없음                      녹색
+  1 주의   뜨거운 화소 1~2 개 (국부 발열), 또는 뜨거운 점 센서        황색
+  2 경고   뜨거운 화소 warning_pixels(3) 개 이상                    적색 점멸, 부저 간헐
+  3 위험   연기 감지, 또는 어느 화소든 abs_limit_c 이상,             적색 상시, 부저 연속, 충전 차단
+           또는 점 센서가 위험 한계 이상
   뜨거운 화소 = (화소 온도 > 주변 온도 + delta_c)
+  점 센서 = 접촉 프로브(DS18B20), 적외선(MLX90614). 뜨거움과 위험 한계는 probe_*, ir_* 설정
+           (비워 두면 delta_c, abs_limit_c 와 같음). 점 센서만으로는 경고(2)까지 가지 않는다.
 
 오경보와 깜빡임을 막는 장치
   - 올라갈 때: 조건이 confirm_s(2 초) 동안 계속되어야 함 (한 프레임 잡음 무시)
@@ -20,6 +25,8 @@ alarm.py - 과열, 연기 판정 (하드웨어와 무관한 순수 로직. tests
   - 연기 기준 전압은 정상 단계에서만 천천히 학습 (불이 났을 때 기준이 따라 올라가지 않게)
 
 안전 쪽 동작: 열화상을 sensor_loss_cut_s(10 초) 넘게 못 읽으면 감시 불가로 보고 충전을 끊는다.
+점 센서는 보조라서 끊겨도 충전을 끊지 않는다 (flags 로 알림). 다만 끊기기 직전 값이 뜨거웠으면
+그 값이 그대로라고 보고 단계를 내리지 않는다 (열에 타서 끊긴 것일 수 있음). 위험 래치도 풀리지 않는다.
 
 기준값(delta_c 8 ℃, abs_limit_c 60 ℃, smoke_dv 0.3 V)은 임시값이다.
 정상 충전 로그를 며칠 모은 뒤 tools/analyze_log.py 로 다시 정할 것.
@@ -39,6 +46,8 @@ FLAG_SMOKE_WARMUP = 1
 FLAG_AMG_INVALID = 2
 FLAG_SHT_INVALID = 4
 FLAG_ADC_INVALID = 8
+FLAG_PROBE_INVALID = 16      # 접촉 프로브(DS18B20) 중 못 읽은 것이 있음
+FLAG_IR_INVALID = 32         # 적외선 온도계(MLX90614) 읽기 실패
 FLAG_TIME_UNSYNCED = 64
 FLAG_SIMULATED = 2048
 
@@ -57,6 +66,11 @@ class AlarmConfig:
     latch_danger: bool = True          # 위험 단계 래치
     cut_level: int = LEVEL_DANGER      # 이 단계 이상이면 충전 차단
     sensor_loss_cut_s: float = 10.0    # 열화상 끊김이 이만큼 계속되면 충전 차단
+    # 점 센서 기준. None 이면 위의 delta_c, abs_limit_c 와 같음 (정상 충전 기록으로 따로 정할 수 있게)
+    probe_delta_c: float | None = None       # 접촉 프로브(DS18B20) 뜨거움: 주변 + 이 값 초과
+    probe_abs_limit_c: float | None = None   # 접촉 프로브 위험 한계
+    ir_delta_c: float | None = None          # 적외선(MLX90614) 뜨거움
+    ir_abs_limit_c: float | None = None      # 적외선 위험 한계
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "AlarmConfig":
@@ -74,6 +88,10 @@ class Frame:
     ambient_c: float | None = None
     rh_pct: float | None = None
     smoke_v: float | None = None
+    probes_c: list | None = None          # DS18B20 접촉 프로브 ℃ (프로브를 안 쓰면 None, 못 읽은 프로브는 None)
+    ir_object_c: float | None = None      # MLX90614 물체 ℃
+    ir_ambient_c: float | None = None     # MLX90614 센서 자체 ℃ (기록만)
+    has_ir: bool = False                  # MLX90614 를 쓰는가 (못 읽은 것과 안 쓰는 것을 구분)
 
 
 @dataclass
@@ -98,9 +116,12 @@ class Status:
     buzzer_on: bool = False
     flags: int = 0
     thermal_c: list[float] = field(default_factory=lambda: [NAN] * 64)
-    # ---- 메시지에는 없는 것 ----
+    # ---- 메시지에는 없는 것 (CSV 기록, 화면, DeviceHealth.message) ----
     fault: bool = False                   # 감시 불가 (열화상 끊김)
     reason: str = ""                      # 사람이 읽는 판정 이유
+    probe_c: list[float] = field(default_factory=list)   # 접촉 프로브 ℃ (못 읽은 것은 NaN)
+    ir_object_c: float = NAN              # 적외선 물체 ℃
+    ir_ambient_c: float = NAN             # 적외선 센서 자체 ℃
 
     MSG_FIELDS = ("level", "latched", "ambient_temp_c", "ambient_rh_pct", "surface_max_c", "surface_mean_c",
                   "surface_min_c", "hot_pixels", "hotspot_index", "delta_c", "abs_limit_c", "smoke_v",
@@ -128,10 +149,59 @@ class AlarmEngine:
         self.baseline: float | None = None
         self.last_pixels_at: float | None = None
         self.reset_requested = False
+        self.point_last: dict[str, float] = {}    # 점 센서별 마지막으로 읽은 값 (끊겼을 때 단계 유지용)
 
     def request_reset(self) -> None:
         """래치 해제 요청. 다음 update 에서 조건이 사라졌으면 해제, 아직이면 무시"""
         self.reset_requested = True
+
+    def _points(self, fr: Frame, s: Status, why: list) -> tuple[int, int]:
+        """점 센서(접촉 프로브, 적외선) -> (즉시 단계, 유지 단계). 위험 한계 이상이면 3, 뜨거우면 1.
+
+        못 읽은 센서는 끊기기 직전 값으로 유지 단계만 계산한다: 뜨거울 때 끊겼으면 단계가 내려가지 않고
+        위험 래치도 풀리지 않는다. 식어 있을 때 끊겼으면 아무 영향 없음 (flags 로만 알림).
+        """
+        c = self.cfg
+        pts = []                                  # (이름, 값, 뜨거움 기준 ℃, 위험 한계 ℃, 실패 플래그)
+        if fr.probes_c is not None:
+            d = c.delta_c if c.probe_delta_c is None else c.probe_delta_c
+            lim = c.abs_limit_c if c.probe_abs_limit_c is None else c.probe_abs_limit_c
+            s.probe_c = [float(v) if _ok(v) else NAN for v in fr.probes_c]
+            pts += [(f"프로브{i + 1}", v, d, lim, FLAG_PROBE_INVALID) for i, v in enumerate(fr.probes_c)]
+        if fr.has_ir:
+            d = c.delta_c if c.ir_delta_c is None else c.ir_delta_c
+            lim = c.abs_limit_c if c.ir_abs_limit_c is None else c.ir_abs_limit_c
+            if _ok(fr.ir_ambient_c):
+                s.ir_ambient_c = fr.ir_ambient_c
+            pts.append(("적외선", fr.ir_object_c, d, lim, FLAG_IR_INVALID))
+        amb = s.ambient_temp_c
+        inst = hold = LEVEL_NORMAL
+        for name, v, d, lim, flag in pts:
+            live = _ok(v)
+            if live:
+                self.point_last[name] = v
+                if flag == FLAG_IR_INVALID:
+                    s.ir_object_c = v
+            else:
+                s.flags |= flag
+                v = self.point_last.get(name)
+                if v is None:
+                    continue
+            hot = _ok(amb) and v > amb + d
+            warm = _ok(amb) and v > amb + d - c.hysteresis_c
+            if live and v >= lim:
+                inst = LEVEL_DANGER
+                why.append(f"{name} {v:.1f}℃ >= {lim:.0f}℃")
+            elif live and hot:
+                inst = max(inst, LEVEL_CAUTION)
+                why.append(f"{name} {v:.1f}℃ (주변+{d:.0f}℃ 초과)")
+            if v >= lim - c.hysteresis_c:
+                hold = LEVEL_DANGER
+            elif warm:
+                hold = max(hold, LEVEL_CAUTION)
+            if not live and (warm or v >= lim - c.hysteresis_c):
+                why.append(f"{name} 끊김 (끊기기 전 {v:.1f}℃): 단계 유지")
+        return inst, hold
 
     # ------------------------------------------------------------------
     def update(self, fr: Frame) -> Status:
@@ -197,32 +267,34 @@ class AlarmEngine:
             self.smoke_since = None
         s.smoke_detected = smoke_now and fr.t - self.smoke_since >= c.confirm_s
 
-        # ---- 즉시 단계 / 유지 단계 ----
-        hot_abs = px is not None and s.surface_max_c >= c.abs_limit_c
-        warm_abs = px is not None and s.surface_max_c >= c.abs_limit_c - c.hysteresis_c
-        if hot_abs or smoke_now:
-            instant = LEVEL_DANGER
-            why.append(f"최고 {s.surface_max_c:.1f}℃ >= {c.abs_limit_c:.0f}℃" if hot_abs else
-                       f"연기 +{s.smoke_v - self.baseline:.2f} V")
-        elif n_hot >= c.warning_pixels:
-            instant = LEVEL_WARNING
-        elif n_hot >= 1:
-            instant = LEVEL_CAUTION
+        # ---- 즉시 단계(지금 조건) / 유지 단계(히스테리시스만큼 여유를 둔 조건) ----
+        # 열화상
+        amg_inst = amg_hold = LEVEL_NORMAL
+        if px is not None:
+            if s.surface_max_c >= c.abs_limit_c:
+                amg_inst = LEVEL_DANGER
+                why.append(f"최고 {s.surface_max_c:.1f}℃ >= {c.abs_limit_c:.0f}℃")
+            elif n_hot >= c.warning_pixels:
+                amg_inst = LEVEL_WARNING
+            elif n_hot >= 1:
+                amg_inst = LEVEL_CAUTION
+            if s.surface_max_c >= c.abs_limit_c - c.hysteresis_c:
+                amg_hold = LEVEL_DANGER
+            elif n_warm >= c.warning_pixels:
+                amg_hold = LEVEL_WARNING
+            elif n_warm >= 1:
+                amg_hold = LEVEL_CAUTION
         else:
-            instant = LEVEL_NORMAL
+            amg_hold = self.level             # 열화상이 없으면 열화상 조건으로는 내려가지 않는다
         if n_hot:
             why.append(f"뜨거운 화소 {n_hot}개 (주변+{c.delta_c:.0f}℃ 초과)")
-        if warm_abs or smoke_hold:
-            hold = LEVEL_DANGER
-        elif n_warm >= c.warning_pixels:
-            hold = LEVEL_WARNING
-        elif n_warm >= 1:
-            hold = LEVEL_CAUTION
-        else:
-            hold = LEVEL_NORMAL
-        if px is None:                        # 열화상이 없으면 열 조건으로는 오르내리지 않는다
-            instant = LEVEL_DANGER if smoke_now else min(instant, self.level)
-            hold = max(hold, self.level)
+        # 점 센서 (접촉 프로브, 적외선)
+        pt_inst, pt_hold = self._points(fr, s, why)
+        # 연기
+        if smoke_now:
+            why.append(f"연기 +{s.smoke_v - self.baseline:.2f} V")
+        instant = max(amg_inst, pt_inst, LEVEL_DANGER if smoke_now else LEVEL_NORMAL)
+        hold = max(amg_hold, pt_hold, LEVEL_DANGER if smoke_hold else LEVEL_NORMAL)
 
         # ---- 단계 전이 ----
         if instant > self.level:

@@ -67,3 +67,35 @@ def test_outputs_off_even_after_error():
 
 def test_yes_requires_fake():
     assert hw.main(["outputs", "--yes"]) == 2
+
+
+def test_missing_ir_fails_i2c():
+    cfg = hw.load(None)
+    bus = hw.open_bus(cfg, fake=True)
+    bus.devices.pop(cfg.sensors.mlx90614_address)          # MLX90614 를 뺀 버스
+    assert hw.check_i2c(cfg, bus) is False
+
+
+def test_w1_count_and_fixed_ids(capsys):
+    cfg = hw.load(None)
+    w1 = hw.open_w1(fake=True)
+    assert hw.check_w1(cfg, w1) is True                      # 3/3
+    gone = w1.present.pop()
+    assert hw.check_w1(cfg, w1) is False                     # 2/3
+    cfg.sensors.ds18b20_ids = [gone]
+    assert hw.check_w1(cfg, w1) is False and "안 보임" in capsys.readouterr().out
+    cfg.sensors.ds18b20_ids, cfg.sensors.ds18b20_count = [], 0
+    assert hw.check_w1(cfg, w1) is True                      # 안 쓰면 건너뜀
+
+
+def test_w1_identify_prints_rounds(capsys):
+    assert hw.main(["w1", "--fake", "--n", "2"], sleep=NO_SLEEP) == 0
+    out = capsys.readouterr().out
+    assert "프로브 구별" in out and out.count("28-00000a000001") >= 3
+
+
+def test_sensors_include_probes_and_ir(capsys):
+    cfg = hw.load(None)
+    assert hw.check_sensors(cfg, hw.open_bus(cfg, fake=True), 2, sleep=NO_SLEEP, w1=hw.open_w1(True)) is True
+    out = capsys.readouterr().out
+    assert "MLX90614 적외선" in out and "프로브3 DS18B20" in out
