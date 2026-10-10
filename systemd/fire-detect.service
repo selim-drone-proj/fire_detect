@@ -4,7 +4,11 @@
 #   journalctl -u fire-detect -f          # 동작 기록 보기
 #
 # 루프가 10 초 넘게 멈추면(WatchdogSec) systemd 가 강제로 재시작한다.
-# 재시작되는 동안 GPIO 가 풀려 SSR, 릴레이가 떨어지므로 충전은 끊긴 쪽으로 간다.
+# 프로세스가 어떻게 끝나든 ExecStopPost 가 출력을 모두 끈다 (--safe-off). Pi 5 커널은 프로세스가 죽어도
+# GPIO 출력을 그대로 두는 설정(pinctrl_rp1 persist_gpio_outputs)이 기본이라 ExecStartPre 가 그것을 끈다.
+# 그래서 재시작되는 동안 SSR, 릴레이가 떨어져 충전은 끊긴 쪽으로 간다.
+# 위험 래치는 /var/lib/fire-detect/latched (StateDirectory) 에 남아 재시작, 재부팅 뒤에도 이어진다.
+# 아래 WatchdogSec, Restart, ExecStartPre, ExecStopPost 는 안전 장치라 바꾸지 않는다.
 [Unit]
 Description=ESS 충전 과열 감시 (fire_detect, ess_01)
 After=multi-user.target
@@ -16,7 +20,10 @@ User=pi
 Group=pi
 SupplementaryGroups=i2c gpio
 RuntimeDirectory=fire-detect
+StateDirectory=fire-detect
+ExecStartPre=-+/bin/sh -c 'test -w /sys/module/pinctrl_rp1/parameters/persist_gpio_outputs && echo N > /sys/module/pinctrl_rp1/parameters/persist_gpio_outputs || true'
 ExecStart=/home/pi/fire_detect/.venv/bin/fire-detect --config /etc/fire-detect/config.yaml
+ExecStopPost=-/home/pi/fire_detect/.venv/bin/fire-detect --safe-off --config /etc/fire-detect/config.yaml
 Restart=always
 RestartSec=2
 WatchdogSec=10

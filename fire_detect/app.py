@@ -5,13 +5,17 @@ app.py - 화재 감지기 본체 (ess_01). 1 초마다: 센서 읽기 -> 판정 
     fire-detect --simulate overheat --speed 50 --out /tmp/fire  # 하드웨어 없이 (가짜 센서, 가짜 출력)
     fire-detect --reset                                          # 위험 래치 해제 요청 (조건이 사라졌을 때만 풀림)
     fire-detect --config ... --ros                               # /fire/ess_01/status, /health/ess_01 발행
+    fire-detect --config ... --safe-off                          # 출력을 모두 끄고 끝냄 (systemd ExecStopPost)
 
-systemd 아래에서는 READY, WATCHDOG 신호를 보낸다. 루프가 멈추면 systemd 가 재시작하고,
-그동안 GPIO 가 풀려 충전이 끊긴다 (outputs.py 의 안전 쪽 설계).
+systemd 아래에서는 READY, WATCHDOG 신호를 보낸다. 루프가 멈추면 systemd 가 죽이고 다시 시작한다.
+Pi 5 커널은 프로세스가 죽어도 GPIO 출력을 그대로 두는 설정(pinctrl_rp1 persist_gpio_outputs)이 기본이라,
+서비스 파일이 시작 전에 그 설정을 끄고(ExecStartPre) 끝난 뒤 --safe-off 로 출력을 끈다(ExecStopPost).
+위험 래치는 latch_file 에 남겨 재시작, 재부팅 뒤에도 이어 간다.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import socket
@@ -70,6 +74,29 @@ class FireApp:
         self.last_health = -1e18
         self.last: Status | None = None
         self.io_errors: dict[str, str] = {}
+        self.latch_path = Path(os.path.expanduser(cfg.latch_file)) if cfg.latch_file else None
+        self.latch_saved = False
+        if self.latch_path is not None and self.latch_path.exists():
+            self.engine.restore_latch()
+            self.latch_saved = True
+            log(f"재시작 전 위험 래치를 이어 감 ({self.latch_path}). 원인을 확인한 뒤 버튼 2 초 또는 fire-detect --reset")
+
+    def _sync_latch(self, s: Status, stamp: float) -> None:
+        """위험 래치를 파일로 남기거나 지운다 (바뀔 때만 쓰므로 SD 카드에 부담 없음)"""
+        if self.latch_path is None or s.latched == self.latch_saved:
+            return
+        if s.latched:
+            def save():
+                self.latch_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.latch_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"since": record("x", stamp, "")["stamp"], "reason": s.reason},
+                                          ensure_ascii=False) + "\n", encoding="utf-8")
+                tmp.replace(self.latch_path)
+            self._safely("래치 기록", save)
+            self.latch_saved = self.latch_path.exists()
+        else:
+            self._safely("래치 기록", lambda: self.latch_path.unlink(missing_ok=True))
+            self.latch_saved = self.latch_path.exists()
 
     # ------------------------------------------------------------------
     def health(self, stamp: float) -> dict:
@@ -131,6 +158,7 @@ class FireApp:
         if self.simulated:
             s.flags |= FLAG_SIMULATED
         self.outputs.apply(s)
+        self._sync_latch(s, stamp)
         prev = self.last
         self.last = s
         if prev is None or (prev.level, prev.latched, prev.fault) != (s.level, s.latched, s.fault):
@@ -177,6 +205,31 @@ class FireApp:
             self.ros.close()
 
 
+# ------------------------------------------------------------------ 비상 끄기
+def safe_off(config_path: str | None, log=print, make_outputs=None) -> int:
+    """출력을 모두 끈 상태로 만들고 끝낸다 (systemd ExecStopPost: 감시 프로세스가 어떻게 끝났든 다음에 실행).
+
+    설정을 못 읽으면 핀을 건드리지 않는다: active_low 를 모르는 채 '끄기'를 하면 오히려 켤 수 있다.
+    (이때는 ExecStartPre 가 꺼 둔 persist_gpio_outputs 덕분에 출력이 이미 입력으로 풀려 있다)
+    """
+    try:
+        cfg = load(config_path)
+    except Exception as e:                                      # noqa: BLE001
+        log(f"safe-off: 설정을 읽을 수 없어 핀을 건드리지 않음: {e}")
+        return 1
+    try:
+        if make_outputs is None:
+            from .outputs import GpioOutputs
+            make_outputs = GpioOutputs
+        outputs = make_outputs(cfg.pins)                        # 열 때 모든 출력이 꺼진 값으로 시작
+        outputs.close()                                         # 한 번 더 끄고 놓음
+    except Exception as e:                                      # noqa: BLE001
+        log(f"safe-off: 출력을 끄지 못함: {e}")
+        return 1
+    log("safe-off: 모든 출력 끔 (충전 차단)")
+    return 0
+
+
 # ------------------------------------------------------------------ 조립
 def build(cfg: Config, simulate: str | None, out: str | None, ros: bool, log=print):
     sc = cfg.sensors
@@ -184,6 +237,7 @@ def build(cfg: Config, simulate: str | None, out: str | None, ros: bool, log=pri
     if simulate:
         from .simulate import FakeW1, Scenario, make_bus
         scen = Scenario(simulate)
+        cfg.latch_file = str(Path(out or ".") / "latched")      # 시뮬레이션의 래치는 기록 폴더에 (실제 장비 것과 섞이지 않게)
         bus = make_bus(scen, sc.amg8833_address, sc.sht31_address, sc.ads1115_address, sc.smoke_divider,
                        sc.mlx90614_address)
         w1, threaded = FakeW1(scen), False                      # 가짜 1-Wire 는 바로 답하므로 스레드 없이
@@ -274,10 +328,13 @@ def main(argv=None) -> int:
     ap.add_argument("--out", help="기록 폴더 (설정의 log.dir 대신)")
     ap.add_argument("--ros", action="store_true", help="ROS 2 로도 발행")
     ap.add_argument("--reset", action="store_true", help="실행 중인 감지기에 래치 해제 요청을 보내고 끝냄")
+    ap.add_argument("--safe-off", action="store_true", help="출력을 모두 끄고 끝냄 (systemd ExecStopPost 용)")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--version", action="version", version=f"fire_detect {__version__}")
     a = ap.parse_args(argv)
 
+    if a.safe_off:
+        return safe_off(a.config)
     cfg = load(a.config)
     if a.simulate:
         cfg.reset_file = str(Path(a.out or ".") / "reset.request")

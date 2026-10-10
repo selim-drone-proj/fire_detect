@@ -12,11 +12,13 @@
 2. 출력 핀을 직접 켜는 명령(gpioset, pinctrl, python 한 줄 등)은 쓰지 않는다. 출력 시험은 hw_check.py 로만 한다.
 3. `/boot/firmware/config.txt`, systemd 유닛, udev 규칙, `/etc/fire-detect/config.yaml` 을 바꾸기 전에
    바꿀 내용을 보여 주고 확인받는다. 바꾸는 파일은 먼저 `<파일>.bak` 으로 복사해 둔다.
-4. 판정 기준(`alarm:` 의 값 전부, 특히 `cut_level`, `latch_danger`, `sensor_loss_cut_s`)과
-   서비스의 `WatchdogSec`, `Restart` 는 바꾸지 않는다. 바꿔야 할 것 같으면 이유를 적어 사람에게 넘긴다.
+4. 판정 기준(`alarm:` 의 값 전부, 특히 `cut_level`, `latch_danger`, `sensor_loss_cut_s`, `start_hold_s`)과
+   서비스의 `WatchdogSec`, `Restart`, `ExecStartPre`, `ExecStopPost`, `StateDirectory` 는 바꾸지 않는다.
+   위험 래치 파일 `/var/lib/fire-detect/latched` 를 지우지 않는다 (해제는 사람이 버튼이나 `fire-detect --reset` 으로).
+   바꿔야 할 것 같으면 이유를 적어 사람에게 넘긴다.
 5. hw_check 는 fire-detect 서비스와 같은 GPIO 를 쓴다. 서비스가 돌고 있으면 사람에게 알리고
    `sudo systemctl stop fire-detect` 후 시험하고, 끝나면 `sudo systemctl start fire-detect`.
-   멈춘 동안은 출력이 풀려 충전이 끊긴 상태다 (안전 쪽).
+   멈출 때 서비스가 출력을 모두 끄므로(ExecStopPost) 멈춘 동안은 충전이 끊긴 상태다 (안전 쪽).
 6. git 은 PR 까지만 한다. 저장소 파일을 고쳤으면 아래 'git 과 PR' 순서대로 새 브랜치에 커밋, push 하고 PR 을 연다.
    PR 승인과 병합, main 에 직접 push, force push, 브랜치 삭제, 저장소 설정 변경은 사람이 한다.
    GitHub 인증은 사람이 보드에 넣어 둔 개인 토큰(`gh auth login`)만 쓰고, 토큰 값은 보지도 남기지도 않는다.
@@ -78,9 +80,12 @@
     이 밖의 값, 특히 `alarm:` 은 건드리지 않는다 (안전 규칙 3, 4).
 11. **서비스**: `sudo cp systemd/fire-detect.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now fire-detect`,
     `systemctl status fire-detect` 가 active (running), `journalctl -u fire-detect -n 50` 에 시작 문구가 있고 오류가 없어야 한다.
+    `cat /sys/module/pinctrl_rp1/parameters/persist_gpio_outputs` 가 N 이어야 한다 (파일이 없으면 그 커널에는 이 설정이 없다는 뜻이니 보고만 한다).
 12. **동작 확인 (사람과 같이, 안전 규칙 1 상태)**: 손이나 따뜻한 물컵을 열화상 앞에 두면 단계가 1, 2 로 오르고
     LED 와 부저가 바뀌는지, `journalctl -u fire-detect -f` 로 본다. 접촉 프로브 하나를 손으로 쥐거나 적외선 앞에 손을 대면
     주의(1)로 오르고 이유에 그 프로브나 적외선이 나와야 한다. 위험 래치가 걸렸으면 버튼 2 초나 `.venv/bin/fire-detect --reset` 으로 푼다.
+    **비상 끄기 확인**: 사람에게 SSR 입력 표시 LED 와 DC 릴레이를 보고 있어 달라고 한 뒤 `sudo systemctl kill -s KILL fire-detect`.
+    3 초 안에 SSR LED 가 꺼지고 릴레이가 떨어져야 하고, 서비스가 다시 시작해 10 초 뒤 다시 켜져야 한다. 안 꺼지면 바로 사람에게 알린다.
 13. **기록**: `~/fire_logs` 에 `fire_*.csv`, `thermal_*.csv`, `fire_*.jsonl` 이 생기는지 확인한다.
 14. **마무리 보고**: 단계별 결과, 바꾼 시스템 파일 목록(.bak 경로 포함), 저장소를 고쳤으면 PR 주소, 남은 문제를 정리해 보여 준다.
 

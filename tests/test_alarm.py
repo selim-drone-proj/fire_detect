@@ -29,7 +29,7 @@ def run(eng, frames):
 
 
 def cfg(**kw):
-    base = dict(smoke_warmup_s=0.0, confirm_s=2.0, clear_s=10.0)
+    base = dict(smoke_warmup_s=0.0, confirm_s=2.0, clear_s=10.0, start_hold_s=0.0)     # 켠 직후 차단은 따로 시험
     base.update(kw)
     return AlarmConfig(**base)
 
@@ -282,3 +282,23 @@ def test_last_raw_probe_sample_holds_danger_when_probe_burns_off():
     eng.request_reset()
     s = eng.update(f(8, None, 66.0))                              # 열화상은 식었지만
     assert s.latched and "프로브1 끊김 (끊기기 전 66.0℃)" in s.reason   # 날값 66 ℃ 로 붙잡음 -> 해제 거부
+
+
+# ------------------------------------------------------------------ 켠 직후 차단, 래치 이어 받기
+def test_start_hold_cuts_first_seconds():
+    eng = AlarmEngine(cfg(start_hold_s=10.0))
+    ss = run(eng, [frame(t) for t in range(12)])
+    assert [s.charge_allowed for s in ss] == [False] * 10 + [True] * 2
+    assert all(s.level == 0 for s in ss) and "켠 직후" in ss[0].reason
+
+
+def test_restored_latch_holds_until_reset():
+    eng = AlarmEngine(cfg())
+    eng.restore_latch()
+    ss = run(eng, [frame(t) for t in range(30)])                  # 식어 있어도 래치 유지
+    assert all(s.level == 3 and s.latched and not s.charge_allowed for s in ss)
+    assert "재시작 전 위험 래치" in ss[-1].reason
+    eng.request_reset()
+    s = eng.update(frame(30))
+    assert not s.latched and s.level == 0 and s.charge_allowed and "수동 해제" in s.reason
+    assert "재시작" not in eng.update(frame(31)).reason

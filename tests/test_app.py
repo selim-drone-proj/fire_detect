@@ -34,10 +34,15 @@ def simulate(tmp_path, scenario, duration, reset_at=None):
     return app
 
 
-def transitions(tmp_path):
+START_HOLD = 10                                                # 켠 직후 충전 차단 (alarm.start_hold_s)
+
+
+def transitions(tmp_path, skip=START_HOLD):
+    """판정 CSV 에서 (줄, 단계, 래치, 충전 허용) 이 바뀌는 곳. 켠 직후 차단 구간은 건너뜀"""
     rows = list(csv.DictReader(open(next(tmp_path.glob("fire_*.csv")), encoding="utf-8")))
+    assert all(r["charge_allowed"] == "0" for r in rows[:skip]) and rows[skip]["charge_allowed"] == "1"
     out, prev = [], None
-    for i, r in enumerate(rows):
+    for i, r in enumerate(rows[skip:], start=skip):
         key = (int(r["level"]), r["latched"] == "1", r["charge_allowed"] == "1")
         if key != prev:
             out.append((i, *key))
@@ -54,7 +59,9 @@ def test_overheat_scenario(tmp_path, validate):
     assert 250 <= t_danger[0] <= 260 and t_danger[2] and not t_danger[3]          # 60 ℃ 도달 직후 차단
     assert tr[-1][0] == 560 and tr[-1][3]                                        # 해제 버튼 뒤 충전 재개
     # 출력: 위험 단계에서 적색 상시 + 부저 연속 + SSR 차단
-    assert dict(red="on", buzzer="on", ssr="off", dc="off").items() <= app.outputs.history[3].items()
+    danger_out = next(h for h in app.outputs.history if h["red"] == "on")
+    assert dict(red="on", buzzer="on", ssr="off", dc="off").items() <= danger_out.items()
+    assert app.outputs.history[0]["ssr"] == "off" and app.outputs.history[1]["ssr"] == "on"   # 켠 직후 차단 뒤 허용
     assert app.outputs.state["ssr"] == "off"                                     # 종료하면 안전 쪽(차단)
     recs = [json.loads(x) for x in next(tmp_path.glob("fire_*.jsonl")).read_text().splitlines()]
     assert {r["type"] for r in recs} == {"fire_status", "device_health"}
@@ -68,7 +75,7 @@ def test_overheat_scenario(tmp_path, validate):
 def test_sensor_loss_scenario(tmp_path, validate):
     simulate(tmp_path, "sensor_loss", 200)
     rows = list(csv.DictReader(open(next(tmp_path.glob("fire_*.csv")), encoding="utf-8")))
-    cut = [i for i, r in enumerate(rows) if r["charge_allowed"] == "0"]
+    cut = [i for i, r in enumerate(rows) if r["charge_allowed"] == "0" and i >= START_HOLD]
     # 60 초부터 끊김 -> 마지막으로 읽은 59 초 + 10 초 = 69 초에 차단, 120 초에 복구되면 바로 허용
     assert cut[0] == 69 and cut[-1] == 119 and rows[-1]["charge_allowed"] == "1"
     health = [json.loads(x) for x in next(tmp_path.glob("fire_*.jsonl")).read_text().splitlines()
@@ -167,7 +174,7 @@ def test_missing_probe_is_degraded_not_cut(tmp_path):
     assert last["state"] == fa.STATE_DEGRADED and not last["sensor_ok_mask"] & 8 and last["sensor_ok_mask"] & 1
     assert "프로브2 안 보임" in last["message"]
     rows = list(csv.DictReader(open(next(tmp_path.glob("fire_*.csv")), encoding="utf-8")))
-    assert all(r["charge_allowed"] == "1" for r in rows) and int(rows[-1]["flags"]) & 16
+    assert all(r["charge_allowed"] == "1" for r in rows[START_HOLD:]) and int(rows[-1]["flags"]) & 16
 
 
 def test_logger_survives_corrupted_file_and_cleans_only_its_own(tmp_path):
@@ -207,3 +214,45 @@ def test_close_stops_probe_reader_thread():
     assert g._thread.is_alive()
     hub.close()
     assert not g._thread.is_alive()
+
+
+# ------------------------------------------------------------------ 안전 쪽 동작 (래치 유지, 비상 끄기, 서비스 파일)
+def test_danger_latch_survives_restart(tmp_path):
+    app = simulate(tmp_path, "overheat", 300)                  # 254 초에 위험 래치
+    latch = tmp_path / "latched"
+    assert app.last.latched and latch.exists() and "60" in json.loads(latch.read_text())["reason"]
+    cfg = load(None)
+    cfg.reset_file = str(tmp_path / "reset.request")
+    app2, scen2 = fa.build(cfg, "normal", str(tmp_path), ros=False, log=lambda m: None)   # 다시 시작 (식은 상태)
+    s = app2.step()
+    assert s.level == 3 and s.latched and not s.charge_allowed and "재시작 전" in s.reason
+    Path(cfg.reset_file).touch()                                 # 원인 확인 뒤 해제
+    s = app2.step()
+    assert not s.latched and not latch.exists()
+    app2.close()
+
+
+def test_safe_off_closes_outputs_and_refuses_unknown_config(tmp_path):
+    made = []
+
+    class Fake:
+        def __init__(self, pins):
+            self.pins, self.closed = pins, False
+            made.append(self)
+
+        def close(self):
+            self.closed = True
+    assert fa.safe_off(None, log=lambda m: None, make_outputs=Fake) == 0
+    assert made[-1].closed and made[-1].pins.ssr == 17
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("pins:\n  sssr: 17\n", encoding="utf-8")         # 오타
+    assert fa.safe_off(str(bad), log=lambda m: None, make_outputs=Fake) == 1 and len(made) == 1   # 핀을 안 건드림
+
+
+def test_service_file_keeps_failsafe_lines():
+    unit = (ROOT / "systemd" / "fire-detect.service").read_text(encoding="utf-8")
+    lines = [x.strip() for x in unit.splitlines() if not x.strip().startswith("#")]
+    assert "WatchdogSec=10" in lines and "Restart=always" in lines and "StateDirectory=fire-detect" in lines
+    assert any(x.startswith("ExecStopPost=") and "--safe-off" in x for x in lines)
+    assert any(x.startswith("ExecStartPre=") and "persist_gpio_outputs" in x and "echo N" in x and "$" not in x
+               for x in lines)                                    # $ 는 systemd 가 먼저 바꿔 버림
