@@ -51,7 +51,7 @@ class SensorHub:
         self.error_count = 0
         self.last_error = ""
         self.started = False
-        self._probe_warned = False
+        self._probe_problem = ""
 
     @property
     def sensor_ok_mask(self) -> int:
@@ -109,12 +109,12 @@ class SensorHub:
         waiting = vals is not None and all(v is None for v in out)      # 막 시작해 첫 값을 기다리는 중
         if slot.partial and vals is not None and not waiting:
             why = slot.sensor.problem(out)
-            slot.last_error = self.last_error = f"DS18B20 {why}"
-            if not self._probe_warned:
-                self._probe_warned = True
+            if why != self._probe_problem:                  # 바뀔 때만 (매 초 덮어써서 다른 센서 오류를 가리지 않게)
+                self._probe_problem = why
+                slot.last_error = self.last_error = f"DS18B20 {why}"
                 self.log(f"DS18B20 일부 못 읽음: {why}")
-        elif not slot.partial and self._probe_warned:
-            self._probe_warned = False
+        elif not slot.partial and self._probe_problem:
+            self._probe_problem = ""
             self.log("DS18B20 모두 다시 읽힘")
         return out
 

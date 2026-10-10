@@ -69,6 +69,7 @@ class FireApp:
         self.started = clock()
         self.last_health = -1e18
         self.last: Status | None = None
+        self.io_errors: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     def health(self, stamp: float) -> dict:
@@ -92,6 +93,18 @@ class FireApp:
                       supply_v=system_info.supply_v() if not self.simulated else None,
                       cpu_temp_c=system_info.cpu_temp_c() if not self.simulated else None,
                       rssi_dbm=0, message=msg[:200])
+
+    def _safely(self, what: str, fn):
+        """부수 작업(기록, ROS)을 돌리고, 실패하면 처음 한 번과 내용이 바뀔 때만 알리고 넘어간다"""
+        try:
+            return fn()
+        except Exception as e:                                  # noqa: BLE001
+            msg = f"{what} 오류: {e}"
+            if self.io_errors.get(what) != msg:
+                self.io_errors[what] = msg
+                self.hub.last_error = msg
+                self.log(f"{msg} (판정과 차단은 계속함)")
+            return None
 
     def check_reset(self) -> bool:
         asked = self.outputs.reset_pressed()
@@ -130,16 +143,18 @@ class FireApp:
             self.log(f"[{LEVEL_NAMES[s.level]}{' 래치' if s.latched else ''}{' 감시불가' if s.fault else ''}] "
                      f"최고 {s.surface_max_c:.1f}℃ 주변 {s.ambient_temp_c:.1f}℃ {points}연기 {s.smoke_v:.2f}V "
                      f"충전 {'허용' if s.charge_allowed else '차단'} {s.reason}")
-        rec = self.logger.write_status(stamp, s) if self.logger else None
+        # 기록, ROS 는 출력보다 뒤. 여기서 난 오류(디스크 가득, 권한, ROS)로 감시 루프가 멈추면 안 된다
+        rec = self._safely("기록", lambda: self.logger.write_status(stamp, s)) if self.logger else None
         if self.ros:
-            self.ros.publish(rec or record("fire_status", stamp, self.cfg.device_id, **s.fields()))
+            self._safely("ROS", lambda: self.ros.publish(rec or record("fire_status", stamp, self.cfg.device_id,
+                                                                         **s.fields())))
         if t - self.last_health >= self.cfg.health_period_s:
             self.last_health = t
             h = self.health(stamp)
             if self.logger:
-                self.logger.write_record(stamp, h)
+                self._safely("기록", lambda: self.logger.write_record(stamp, h))
             if self.ros:
-                self.ros.publish(h)
+                self._safely("ROS", lambda: self.ros.publish(h))
         if self.display:
             try:
                 self.display.show(s)

@@ -67,10 +67,11 @@
 7. **I2C, 1-Wire**: `sudo i2cdetect -y 1` 에 44, 48, 5a, 69 (OLED 를 달았으면 3c), `ls /sys/bus/w1/devices/` 에 `28-` 셋.
    그다음 `.venv/bin/python tools/hw_check.py i2c` 와 `.venv/bin/python tools/hw_check.py w1`.
 8. **센서**: `.venv/bin/python tools/hw_check.py sensors --n 10`. MQ-2 는 켠 뒤 3 분 예열이라 처음 값이 높다.
-   프로브 위치 구별: 사람에게 "프로브를 하나씩 10 초씩 손으로 쥐어 달라"고 부탁하고 `.venv/bin/python tools/hw_check.py w1 --n 40`
-   을 돌린다. ↑ 가 붙은 ID 와 사람이 말한 위치(상판, 측면, 뒷면)를 짝지어 `~/fire_setup_log.md` 에 적는다.
+   프로브 위치 구별: 사람에게 "프로브를 하나씩 10 초씩 손으로 쥐어 달라"고 부탁하고 `.venv/bin/python tools/hw_check.py w1 --n 20`
+   (약 50 초)을 돌린다. 괄호 안 상승폭이 커지는 ID 와 사람이 말한 위치(상판, 측면, 뒷면)를 짝지어 `~/fire_setup_log.md` 에 적는다.
 9. **출력**: 안전 규칙 1 을 지킨 뒤 `.venv/bin/python tools/hw_check.py outputs`. 사람이 보고 답한다.
-   시작 직후 이미 붙어 있는 릴레이가 있으면 active_low 설정이 반대다. 버튼은 `.venv/bin/python tools/hw_check.py button`.
+   시작 직후 이미 붙어 있는 릴레이가 있으면 active_low 설정이 반대다. 릴레이나 SSR 이 끈 뒤에도 떨어지지 않으면
+   README 2장 하드웨어 주의를 사람에게 보여 주고 배선 변경을 부탁한다 (3.3 V 신호로 안 떨어지는 모듈). 버튼은 `.venv/bin/python tools/hw_check.py button`.
 10. **설정 파일**: `sudo mkdir -p /etc/fire-detect && sudo cp config.example.yaml /etc/fire-detect/config.yaml`.
     9 단계 결과에 따라 `relay_active_low`, `ssr_active_low`, `buzzer_active_low` 를 맞추고, 8 단계에서 짝지은 프로브 ID 를
     `sensors.ds18b20_ids` 에 [상판, 측면, 뒷면] 순서로 적는다. 달지 않은 센서는 `mlx90614_address: -1`, `ds18b20_count: 0`.
@@ -92,7 +93,8 @@
   Ubuntu 에서 `modinfo w1_therm` 이 없다고 하면 `apt-cache search linux-modules-extra` 로 raspi 커널용 추가 모듈 패키지를 찾아 사람에게 보고한다.
 - `28-` 가 셋보다 적음: DQ 는 핀 7, DQ 와 3.3 V 사이 4.7 kΩ, 3 선 결선(기생 전원 아님)인지 사람에게 확인을 부탁한다.
   프로브 키트의 어댑터 기판을 5 V 에 꽂으면 안 된다.
-- 기록이나 journal 에 DS18B20 "85 ℃ 초기값", "CRC 불일치" 가 잦음: 전원, 접촉 불량, 선 길이. 선이 길면 풀업을 2.2 kΩ 로 낮추는 것을 사람에게 제안한다.
+- 기록이나 journal 에 DS18B20 "빈 값", "85 ℃ 초기값" 이 잦음: 전원, 접촉 불량, 선 길이. 선이 길면 풀업을 2.2 kΩ 로 낮추는 것을 사람에게 제안한다.
+  (요즘 커널은 응답이 없거나 CRC 가 계속 틀리면 w1_slave 를 비워서 준다)
 - MLX90614 "PEC 불일치": 배선, 버스 속도(100 kHz 이하), 풀업. 0x5A 가 안 보이면 GY-906 전원(3.3 V)과 SDA, SCL 을 확인한다.
 - AMG8833 보드 온도가 주변보다 몇 도 높은 것은 정상이다.
 - 시각: 기록은 UTC. `timedatectl` 의 NTP 동기화가 no 이면 기록에 TIME_UNSYNCED 가 붙는다.

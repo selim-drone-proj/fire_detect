@@ -219,3 +219,63 @@ def test_fake_w1_matches_kernel_format():
     assert w1.ids() == list(FakeW1.IDS)
     v = ds18b20.parse_w1_slave(w1.read_slave(FakeW1.IDS[0]))
     assert v == pytest.approx(27.0, abs=0.3) and v * 16 == int(v * 16)    # 1/16 ℃ 단위
+
+
+def _poll(g, seconds):
+    import time as _t
+    seen, end = [], _t.monotonic() + seconds
+    while _t.monotonic() < end:
+        seen.append(g.read())
+        _t.sleep(0.005)
+    return seen
+
+
+def test_threaded_reader_ignores_single_spike_but_follows_real_rise():
+    spike = ScriptedW1({A: [25.0] * 5 + [70.0] + [25.0] * 5})        # 한 번만 튄 값 (CRC 는 맞음)
+    g = ds18b20.ProbeGroup(spike, count=1, threaded=True, period_s=0.01, max_age_s=5.0)
+    g.begin()
+    try:
+        seen = [v[0] for v in _poll(g, 0.6) if v[0] is not None]
+    finally:
+        g.close()
+    assert seen and max(seen) == 25.0                     # 연속 두 값 중 낮은 값: 70 은 나오지 않음
+    rise = ScriptedW1({A: [25.0] * 3 + [70.0]})                       # 계속 70 이면 따라감
+    g = ds18b20.ProbeGroup(rise, count=1, threaded=True, period_s=0.01, max_age_s=5.0)
+    g.begin()
+    try:
+        seen = [v[0] for v in _poll(g, 0.6) if v[0] is not None]
+    finally:
+        g.close()
+    assert seen[-1] == 70.0
+
+
+def test_probe_numbers_do_not_shift_when_rediscovered():
+    w1 = ScriptedW1({A: [25.0], B: [26.0], C: [27.0]})
+    g = ds18b20.ProbeGroup(w1, count=3)
+    g.begin()
+    assert g.ids == [A, B, C]
+    del w1.values[B]                                      # 프로브 2 가 사라진 뒤 다시 찾아도
+    assert "안 보임" in g.begin() and g.ids == [A, B, C]  # 프로브 3 이 2 번으로 당겨지지 않음
+    assert g.read() == [25.0, None, 27.0]
+    w1 = ScriptedW1({A: [25.0], C: [27.0]})
+    g = ds18b20.ProbeGroup(w1, count=3)
+    g.begin()
+    assert g.ids == [A, C, None]
+    w1.values[B] = [26.0]                                 # 나중에 붙은 프로브는 빈 자리로만
+    g.begin()
+    assert g.ids == [A, C, B]
+
+
+def test_threaded_rebegin_without_fresh_values_stays_failed():
+    import time as _t
+    w1 = ScriptedW1({A: [None]})                           # 보이기는 하는데 읽히지 않음
+    g = ds18b20.ProbeGroup(w1, count=1, threaded=True, period_s=0.01, max_age_s=0.05)
+    g.begin()
+    try:
+        _t.sleep(0.1)
+        with pytest.raises(IOError):
+            g.read()
+        with pytest.raises(IOError):
+            g.begin()                                     # 다시 연결해도 '연결됨' 이 되지 않음
+    finally:
+        g.close()

@@ -27,7 +27,7 @@ STATUS_COLUMNS = [
     "charge_allowed", "dc_allowed", "buzzer", "flags", "fault", "reason",
 ]
 THERMAL_COLUMNS = ["time_unix", "time_iso"] + [f"p{i:02d}" for i in range(64)]
-DAY_RE = re.compile(r"_(\d{8})(?:_\d+)?\.[a-z]+$")          # fire_20261010.csv, fire_20261010_1.csv
+DAY_RE = re.compile(r"^(?:fire|thermal)_(\d{8})(?:_\d+)?\.(?:csv|jsonl)$")   # 이 프로그램이 만든 파일만 지운다
 
 
 def status_columns(probe_count: int = 0, ir: bool = False) -> list[str]:
@@ -61,13 +61,7 @@ class FireLogger:
         if name not in self.files:
             path = self.dir / name
             if header and path.exists() and path.stat().st_size > 0:
-                with open(path, encoding="utf-8") as fh0:
-                    first = fh0.readline().rstrip("\r\n")
-                if first != ",".join(header):                 # 열이 바뀜: 그날 파일을 옆으로 옮기고 새로
-                    n = 1
-                    while (self.dir / f"{path.stem}_{n}{path.suffix}").exists():
-                        n += 1
-                    path.rename(self.dir / f"{path.stem}_{n}{path.suffix}")
+                self._rotate_if_header_differs(path, header)
             new = not path.exists() or path.stat().st_size == 0
             fh = open(path, "a", newline="", encoding="utf-8")
             w = csv.writer(fh, lineterminator="\n") if header else None
@@ -75,6 +69,20 @@ class FireLogger:
                 w.writerow(header)
             self.files[name] = (fh, w)
         return self.files[name]
+
+    def _rotate_if_header_differs(self, path: Path, header: list[str]) -> None:
+        """열이 바뀌었으면 그날 파일을 fire_YYYYmmdd_N.csv 로 옮긴다. 바이트로 비교 (정전으로 깨진 글자가 있어도 안전)"""
+        try:
+            with open(path, "rb") as fh0:
+                first = fh0.readline(65536).rstrip(b"\r\n")
+            if first == ",".join(header).encode("utf-8"):
+                return
+            n = 1
+            while (self.dir / f"{path.stem}_{n}{path.suffix}").exists():
+                n += 1
+            path.rename(self.dir / f"{path.stem}_{n}{path.suffix}")
+        except OSError:
+            pass                                    # 못 옮기면 그냥 이어 쓴다 (기록 때문에 감시가 멈추면 안 됨)
 
     def _roll(self, stamp: float):
         day = time.strftime("%Y%m%d", time.gmtime(stamp))
@@ -120,10 +128,13 @@ class FireLogger:
         limit = time.strftime("%Y%m%d", time.gmtime(now - self.keep_days * 86400))
         removed = []
         for p in sorted(self.dir.iterdir()):
-            m = DAY_RE.search(p.name)
+            m = DAY_RE.match(p.name)
             if m and p.is_file() and m.group(1) < limit:
-                p.unlink()
-                removed.append(p.name)
+                try:
+                    p.unlink()
+                    removed.append(p.name)
+                except OSError:
+                    pass
         return removed
 
     def close(self):

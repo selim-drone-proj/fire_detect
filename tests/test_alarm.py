@@ -235,3 +235,33 @@ def test_probe_lost_while_cool_does_not_block_clearing():
     assert eng.level == 1                                         # 열화상 때문에 주의
     ss = run(eng, [pframe(t, **lost) for t in range(8, 25)])
     assert ss[-1].level == 0                                      # 식어 있을 때 끊긴 프로브는 내려가는 것을 막지 않음
+
+
+def test_lost_probe_hold_is_frozen_not_rejudged_with_new_ambient():
+    eng = AlarmEngine(cfg())
+    run(eng, [pframe(t, probes=(28.0, AMB + 3, AMB + 3)) for t in range(3)])       # 28 ℃: 주변 24 기준 안 뜨거움
+    cold = dict(probes=(None, 21.0, 21.0), ir=21.0)
+    run(eng, [pframe(t, **cold) for t in range(3, 5)])                               # 프로브 1 끊김
+    ss = [eng.update(Frame(t, [19.0] * 63 + [30.0], 18.0, 45.0, 0.8, probes_c=[None, 21.0, 21.0],
+                           ir_object_c=21.0, has_ir=True)) for t in range(5, 12)]    # 밤: 주변 18, 화소 하나 뜨거움
+    assert ss[-1].level == 1
+    ss = [eng.update(Frame(t, [19.0] * 64, 18.0, 45.0, 0.8, probes_c=[None, 21.0, 21.0], ir_object_c=21.0,
+                           has_ir=True)) for t in range(12, 30)]
+    assert ss[-1].level == 0 and "끊김" not in ss[-1].reason                         # 옛 28 ℃ 가 이제 와서 뜨겁다고 붙잡지 않음
+
+
+def test_ir_lost_while_warm_keeps_caution():
+    eng = AlarmEngine(cfg())
+    run(eng, [pframe(t, ir=AMB + 12) for t in range(4)])
+    assert eng.level == 1
+    ss = run(eng, [pframe(t, ir=None) for t in range(4, 30)])
+    assert ss[-1].level == 1 and ss[-1].flags & al.FLAG_IR_INVALID and "적외선 끊김" in ss[-1].reason
+
+
+def test_point_limits_work_without_any_ambient():
+    eng = AlarmEngine(cfg())
+    f = [Frame(t, None, None, None, 0.8, probes_c=[AMB + 10, AMB, AMB]) for t in range(4)]
+    ss = run(eng, f)
+    assert ss[-1].level == 0                                     # 주변을 모르면 '뜨거움' 은 판단 안 함
+    ss = run(eng, [Frame(t, None, None, None, 0.8, probes_c=[61.0, AMB, AMB]) for t in range(4, 8)])
+    assert ss[-1].level == 3 and not ss[-1].charge_allowed       # 한계는 주변 없이도

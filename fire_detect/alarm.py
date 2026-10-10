@@ -41,7 +41,7 @@ NAN = float("nan")
 LEVEL_NORMAL, LEVEL_CAUTION, LEVEL_WARNING, LEVEL_DANGER = 0, 1, 2, 3
 LEVEL_NAMES = {0: "정상", 1: "주의", 2: "경고", 3: "위험"}
 
-# FireStatus.msg 상수와 같은 값
+# FireStatus.msg 상수와 같은 값. 16, 32 는 점 센서와 함께 추가 (moving-ver 의 FireStatus.msg 에도 같은 PR 을 올림)
 FLAG_SMOKE_WARMUP = 1
 FLAG_AMG_INVALID = 2
 FLAG_SHT_INVALID = 4
@@ -149,7 +149,7 @@ class AlarmEngine:
         self.baseline: float | None = None
         self.last_pixels_at: float | None = None
         self.reset_requested = False
-        self.point_last: dict[str, float] = {}    # 점 센서별 마지막으로 읽은 값 (끊겼을 때 단계 유지용)
+        self.point_last: dict[str, tuple[float, int]] = {}   # 점 센서별 마지막 (값, 유지 단계). 끊겼을 때 씀
 
     def request_reset(self) -> None:
         """래치 해제 요청. 다음 update 에서 조건이 사라졌으면 해제, 아직이면 무시"""
@@ -158,8 +158,9 @@ class AlarmEngine:
     def _points(self, fr: Frame, s: Status, why: list) -> tuple[int, int]:
         """점 센서(접촉 프로브, 적외선) -> (즉시 단계, 유지 단계). 위험 한계 이상이면 3, 뜨거우면 1.
 
-        못 읽은 센서는 끊기기 직전 값으로 유지 단계만 계산한다: 뜨거울 때 끊겼으면 단계가 내려가지 않고
+        못 읽은 센서는 마지막으로 읽었을 때의 유지 단계를 그대로 쓴다: 뜨거울 때 끊겼으면 단계가 내려가지 않고
         위험 래치도 풀리지 않는다. 식어 있을 때 끊겼으면 아무 영향 없음 (flags 로만 알림).
+        (끊긴 값을 지금의 주변 온도와 다시 비교하지 않는다: 밤에 주변이 식었다고 옛 값이 뜨거워지지 않게)
         """
         c = self.cfg
         pts = []                                  # (이름, 값, 뜨거움 기준 ℃, 위험 한계 ℃, 실패 플래그)
@@ -171,36 +172,36 @@ class AlarmEngine:
         if fr.has_ir:
             d = c.delta_c if c.ir_delta_c is None else c.ir_delta_c
             lim = c.abs_limit_c if c.ir_abs_limit_c is None else c.ir_abs_limit_c
+            if _ok(fr.ir_object_c):
+                s.ir_object_c = fr.ir_object_c
             if _ok(fr.ir_ambient_c):
                 s.ir_ambient_c = fr.ir_ambient_c
             pts.append(("적외선", fr.ir_object_c, d, lim, FLAG_IR_INVALID))
         amb = s.ambient_temp_c
         inst = hold = LEVEL_NORMAL
         for name, v, d, lim, flag in pts:
-            live = _ok(v)
-            if live:
-                self.point_last[name] = v
-                if flag == FLAG_IR_INVALID:
-                    s.ir_object_c = v
-            else:
+            if not _ok(v):
                 s.flags |= flag
-                v = self.point_last.get(name)
-                if v is None:
-                    continue
-            hot = _ok(amb) and v > amb + d
-            warm = _ok(amb) and v > amb + d - c.hysteresis_c
-            if live and v >= lim:
+                last = self.point_last.get(name)
+                if last is not None and last[1] > LEVEL_NORMAL:
+                    hold = max(hold, last[1])
+                    if self.level >= last[1]:
+                        why.append(f"{name} 끊김 (끊기기 전 {last[0]:.1f}℃): 단계 유지")
+                continue
+            if v >= lim:
                 inst = LEVEL_DANGER
                 why.append(f"{name} {v:.1f}℃ >= {lim:.0f}℃")
-            elif live and hot:
+            elif _ok(amb) and v > amb + d:
                 inst = max(inst, LEVEL_CAUTION)
                 why.append(f"{name} {v:.1f}℃ (주변+{d:.0f}℃ 초과)")
             if v >= lim - c.hysteresis_c:
-                hold = LEVEL_DANGER
-            elif warm:
-                hold = max(hold, LEVEL_CAUTION)
-            if not live and (warm or v >= lim - c.hysteresis_c):
-                why.append(f"{name} 끊김 (끊기기 전 {v:.1f}℃): 단계 유지")
+                h = LEVEL_DANGER
+            elif _ok(amb) and v > amb + d - c.hysteresis_c:
+                h = LEVEL_CAUTION
+            else:
+                h = LEVEL_NORMAL
+            hold = max(hold, h)
+            self.point_last[name] = (v, h)
         return inst, hold
 
     # ------------------------------------------------------------------

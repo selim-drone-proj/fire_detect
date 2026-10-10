@@ -168,3 +168,42 @@ def test_missing_probe_is_degraded_not_cut(tmp_path):
     assert "프로브2 안 보임" in last["message"]
     rows = list(csv.DictReader(open(next(tmp_path.glob("fire_*.csv")), encoding="utf-8")))
     assert all(r["charge_allowed"] == "1" for r in rows) and int(rows[-1]["flags"]) & 16
+
+
+def test_logger_survives_corrupted_file_and_cleans_only_its_own(tmp_path):
+    from fire_detect.alarm import Status
+    from fire_detect.logger import FireLogger
+    stamp = 1791590400.0                                       # 2026-10-10 UTC
+    (tmp_path / "fire_20261010.csv").write_bytes(b"time_unix,\xed\x95")          # 정전으로 잘린 글자
+    (tmp_path / "notes_20250101.md").write_text("keep")
+    lg = FireLogger(tmp_path, "ess_01", probe_count=3, ir=True)
+    lg.write_status(stamp, Status())                           # 예외 없이
+    lg.close()
+    assert (tmp_path / "fire_20261010_1.csv").exists()
+    assert lg.cleanup(stamp + 100 * 86400) and (tmp_path / "notes_20250101.md").exists()
+
+
+def test_logging_failure_does_not_stop_the_safety_loop(tmp_path):
+    cfg = load(None)
+    cfg.reset_file = str(tmp_path / "reset.request")
+    msgs = []
+    app, scen = fa.build(cfg, "hidden_heat", str(tmp_path), ros=False, log=msgs.append)
+
+    def full(*a):
+        raise OSError(28, "No space left on device")
+    app.logger.write_status = app.logger.write_record = full
+    fa.run(app, scen, 1.0, 300, 0, None)
+    assert app.last.level == 3 and not app.last.charge_allowed            # 기록이 안 돼도 판정, 차단은 계속
+    assert sum("기록 오류" in m for m in msgs) == 1
+
+
+def test_close_stops_probe_reader_thread():
+    from fire_detect.drivers.ds18b20 import ProbeGroup
+    from fire_detect.sensors import SensorHub
+    from fire_detect.simulate import FakeW1, Scenario
+    g = ProbeGroup(FakeW1(Scenario("normal")), threaded=True, period_s=0.01)
+    hub = SensorHub(probes=g)
+    hub.begin()
+    assert g._thread.is_alive()
+    hub.close()
+    assert not g._thread.is_alive()

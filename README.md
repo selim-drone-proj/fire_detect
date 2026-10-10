@@ -26,7 +26,8 @@
   기준은 `probe_delta_c`, `probe_abs_limit_c`, `ir_delta_c`, `ir_abs_limit_c` 로 따로 정할 수 있고 비워 두면 열화상과 같습니다.
 - 점 센서는 보조라서 끊겨도 충전을 끊지 않습니다. flags(bit4 프로브, bit5 적외선)와 DeviceHealth 의 DEGRADED 로 알립니다.
   다만 **끊기기 직전 값이 뜨거웠으면** 그 단계에서 내려가지 않고 위험 래치도 풀리지 않습니다 (열에 타서 끊긴 것일 수 있음).
-  프로브를 아예 뺐다면 설정의 개수를 고치고 서비스를 다시 시작합니다.
+  이때는 먼저 그 자리가 왜 뜨거웠는지 확인하고 프로브를 고칩니다. 프로브를 아예 빼려면 원인을 확인한 뒤
+  설정의 개수(또는 `ds18b20_ids`)를 고치고 서비스를 다시 시작합니다.
 - 규격 v0.2 의 FireStatus 에는 프로브, 적외선 온도 필드가 없습니다. 값은 CSV 기록(`probe1_c`, `ir_c` 열)과
   판정 이유(DeviceHealth.message)로 나가고, 규격에 필드를 넣는 것은 다음 판에서 합니다.
 - **기준값(8 ℃, 60 ℃, 0.3 V)은 임시값입니다.** 5장 순서로 정상 충전 기록을 보고 다시 정하십시오.
@@ -44,7 +45,7 @@
 | MLX90614 적외선 (GY-906) | I2C, 3.3 V | 0x5A | 감시할 면에서 3~5 cm. 무광 테이프 붙인 자리를 보게 |
 | ADS1115 ADC | I2C, **3.3 V 로 켤 것**, ADDR -> GND | 0x48 | |
 | MQ-2 연기 (5 V 히터) | VCC 5 V, AO -> 10 kΩ -> ADS1115 A0 -> 20 kΩ -> GND | | 분압 2/3, `smoke_divider: 1.5`. **DO 핀은 연결하지 않음 (5 V 출력)** |
-| DS18B20 접촉 프로브 x3 (방수형 3선) | 빨강 3.3 V, 검정 GND, 노랑 DQ -> BCM 4 (핀 7). **DQ 와 3.3 V 사이 4.7 kΩ 하나** | `28-...` | 상판, 측면, 뒷면에 알루미늄 테이프로 붙임 |
+| DS18B20 접촉 프로브 x3 (방수형 3선) | 빨강 3.3 V, 검정 GND, 노랑 DQ -> BCM 4 (핀 7). **DQ 와 3.3 V 사이 4.7 kΩ 하나** (키트의 어댑터 기판을 쓰면 기판에 이미 있음) | `28-...` | 상판, 측면, 뒷면에 알루미늄 테이프로 붙임 |
 | SSD1306 OLED (선택) | I2C, 3.3 V | 0x3C | |
 
 | 출력 | BCM GPIO (40핀) | 비고 |
@@ -54,6 +55,10 @@
 | 능동 부저 TMB12A05 | 22 (15) | 5 V 부저는 트랜지스터나 릴레이 채널을 거칠 것 |
 | 신호등 LED 적, 황, 녹 | 5 (29), 6 (31), 13 (33) | GPIO -> 330 Ω -> LED -> GND |
 | 래치 해제 버튼 | 26 (37) | GND 로 누름, 내부 풀업 |
+
+**안전 쪽 설계.** SSR 과 릴레이는 "통전해야 충전" 입니다. 프로그램이 죽거나, 멈추거나(systemd watchdog 10 초),
+Pi 전원이 나가면 출력이 풀려 충전이 끊깁니다. 켤 때도 첫 판정 전까지는 끊긴 상태입니다.
+SSR 이 끊는 것은 감지기 자신의 전원이 아니라 감시 대상 파워뱅크의 충전 라인입니다.
 
 전원과 GND 핀 (예): 핀 1 (3.3 V) I2C 센서 5 개, 핀 17 (3.3 V) DS18B20 과 4.7 kΩ, 핀 2 (5 V) MQ-2,
 핀 4 (5 V) 릴레이 모듈, 부저와 SSR 트랜지스터. GND 는 6, 9, 14, 20, 25, 30, 34, 39 어느 것이든 같습니다.
@@ -76,7 +81,7 @@ Ubuntu 는 `/boot/firmware/overlays/w1-gpio-pi5.dtbo` 가 있으면 `dtoverlay=w
 재부팅 뒤 `ls /sys/bus/w1/devices/` 에 `28-` 로 시작하는 것이 셋 보여야 합니다.
 
 **프로브 위치 고정**: 설정의 `ds18b20_ids` 를 비워 두면 찾은 ID 를 정렬한 순서가 프로브 1, 2, 3 이라,
-하나가 빠진 채 켜지면 번호가 밀립니다. `hw_check.py w1 --n 30` 을 돌리며 프로브를 하나씩 손으로 쥐어 어느 ID 가
+하나가 빠진 채 켜지면 번호가 밀립니다. `hw_check.py w1 --n 20` (약 50 초)을 돌리며 프로브를 하나씩 손으로 쥐어 어느 ID 가
 어디인지 확인하고 `ds18b20_ids: [상판 ID, 측면 ID, 뒷면 ID]` 처럼 적어 두십시오.
 배기구 바로 앞은 정상 충전 중에도 뜨거우니 처음에는 배기구에서 떨어진 케이스 면에 붙이고, 5장 순서로 기준을 정합니다.
 
@@ -99,9 +104,9 @@ journalctl -u fire-detect -f
 
 ```bash
 .venv/bin/python tools/hw_check.py i2c              # I2C 센서 4 종 응답 (AMG8833, SHT31, ADS1115, MLX90614)
-.venv/bin/python tools/hw_check.py w1 --n 30        # 접촉 프로브 개수, 30 초 동안 온도 표시 (하나씩 쥐어 위치 구별)
+.venv/bin/python tools/hw_check.py w1 --n 20        # 접촉 프로브 개수, 약 50 초 동안 온도 표시 (하나씩 쥐어 위치 구별)
 .venv/bin/python tools/hw_check.py sensors --n 10   # 값이 말이 되는지 (MQ-2 는 3 분 예열)
-.venv/bin/python tools/hw_check.py outputs          # LED, 부저, DC 릴레이, SSR 을 하나씩. SSR 의 AC 쪽을 뺀 뒤에만
+.venv/bin/python tools/hw_check.py outputs          # LED, 부저, DC 릴레이, SSR 을 하나씩 (릴레이, SSR 은 꺼지는지도). SSR 의 AC 쪽을 뺀 뒤에만
 .venv/bin/python tools/hw_check.py button           # 래치 해제 버튼
 ```
 

@@ -3,7 +3,7 @@ hw_check.py - 화재 감지기(ess_01) 보드를 처음 꾸릴 때 부품을 하
 
     python3 tools/hw_check.py i2c                # I2C 센서(AMG8833, SHT31, ADS1115, MLX90614)가 응답하는지
     python3 tools/hw_check.py w1                 # 1-Wire 접촉 프로브(DS18B20)가 몇 개 보이는지
-    python3 tools/hw_check.py w1 --n 30          #   + 30 초 동안 프로브 온도를 보여 줌 (하나씩 손으로 쥐어 위치 구별)
+    python3 tools/hw_check.py w1 --n 20          #   + 20 바퀴(약 50 초) 프로브 온도를 보여 줌 (하나씩 손으로 쥐어 위치 구별)
     python3 tools/hw_check.py sensors --n 10     # 센서를 모두 10 번 읽고 값이 말이 되는지
     python3 tools/hw_check.py outputs            # LED, 부저, DC 릴레이, SSR 을 하나씩 켰다 끔 (사람이 보고 답함)
     python3 tools/hw_check.py button             # 래치 해제 버튼 (30 초 기다림)
@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fire_detect.config import Config, load  # noqa: E402
 from fire_detect.drivers.ads1115 import ADS1115  # noqa: E402
 from fire_detect.drivers.amg8833 import AMG8833  # noqa: E402
-from fire_detect.drivers.ds18b20 import ProbeGroup, parse_w1_slave  # noqa: E402
+from fire_detect.drivers.ds18b20 import POWER_ON_C, ProbeGroup, normalize_ids, parse_w1_slave  # noqa: E402
 from fire_detect.drivers.mlx90614 import MLX90614  # noqa: E402
 from fire_detect.drivers.sht31 import SHT31  # noqa: E402
 
@@ -40,14 +40,15 @@ DEFAULT_CONFIG = "/etc/fire-detect/config.yaml"
 PASS, FAIL, WARN, SKIP = "통과", "실패", "주의", "안 씀"
 AC_CONFIRM = "AC 분리"
 
-# 출력 시험 순서: 위험이 적은 것부터
+# 출력 시험 순서: 위험이 적은 것부터. (키, 이름, 켰을 때 질문, 끈 뒤 질문)
+# 릴레이와 SSR 은 끈 뒤에도 묻는다: 3.3 V 신호로는 붙기만 하고 확실히 떨어지지 않는 모듈이 있다
 OUTPUTS = [
-    ("green", "녹색 LED", "켜졌습니까"),
-    ("yellow", "황색 LED", "켜졌습니까"),
-    ("red", "적색 LED", "켜졌습니까"),
-    ("buzzer", "부저", "소리가 났습니까"),
-    ("dc", "DC 차단 릴레이", "딸깍 붙고 릴레이 표시 LED 가 켜졌습니까"),
-    ("ssr", "AC 충전 SSR", "SSR 의 입력 표시 LED 가 켜졌습니까"),
+    ("green", "녹색 LED", "켜졌습니까", None),
+    ("yellow", "황색 LED", "켜졌습니까", None),
+    ("red", "적색 LED", "켜졌습니까", None),
+    ("buzzer", "부저", "소리가 났습니까", None),
+    ("dc", "DC 차단 릴레이", "딸깍 붙고 릴레이 표시 LED 가 켜졌습니까", "다시 딸깍 떨어지고 표시 LED 가 꺼졌습니까"),
+    ("ssr", "AC 충전 SSR", "SSR 의 입력 표시 LED 가 켜졌습니까", "SSR 의 입력 표시 LED 가 꺼졌습니까"),
 ]
 
 
@@ -149,11 +150,12 @@ def check_w1(cfg: Config, w1, rounds: int = 0, sleep=time.sleep) -> bool:
     except Exception as e:                                  # noqa: BLE001
         return report([("DS18B20 접촉 프로브", FAIL, str(e))])
     rows = []
-    if sc.ds18b20_ids:
-        for i, rid in enumerate(sc.ds18b20_ids):
+    want_ids = normalize_ids(sc.ds18b20_ids)                # 서비스와 같은 규칙 (대문자, 공백, 문자열 하나)
+    if want_ids:
+        for i, rid in enumerate(want_ids):
             seen = rid in found
             rows.append((f"프로브{i + 1}", PASS if seen else FAIL, f"{rid} {'보임' if seen else '안 보임'}"))
-        extra = [x for x in found if x not in sc.ds18b20_ids]
+        extra = [x for x in found if x not in want_ids]
         if extra:
             rows.append(("설정에 없는 프로브", WARN, ", ".join(extra)))
     else:
@@ -162,25 +164,29 @@ def check_w1(cfg: Config, w1, rounds: int = 0, sleep=time.sleep) -> bool:
         rows.append(("DS18B20 접촉 프로브", PASS if len(found) == want else FAIL,
                      f"{len(found)}/{want} 개: {', '.join(found) or '없음'}{hint}"))
     ok = report(rows)
-    ids = list(sc.ds18b20_ids) or found
+    ids = want_ids or found
     if rounds > 0 and ids:
-        print(f"프로브 구별: {rounds} 번 (1 초 간격) 읽는 동안 프로브를 하나씩 손으로 쥐어 보십시오. "
-              "1 ℃ 넘게 오른 것에 ↑ 가 붙습니다.")
+        print(f"프로브 구별: {rounds} 바퀴 (프로브 하나 읽는 데 약 0.75 초) 동안 프로브를 하나씩 10 초씩 손으로 "
+              "쥐어 보십시오. 괄호 안은 처음보다 오른 ℃ 이고, 지금 쥐고 있는 프로브가 계속 오릅니다.")
         first: dict[str, float] = {}
+        t0 = time.monotonic()
         for k in range(rounds):
             cells = []
             for rid in ids:
                 try:
                     v = parse_w1_slave(w1.read_slave(rid))
                 except Exception:                           # noqa: BLE001
-                    cells.append(f"{rid} --")
+                    cells.append(f"{rid}    --        ")
+                    continue
+                if v == POWER_ON_C:                         # 전원 초기값 (변환 안 됨): 오름으로 치지 않음
+                    cells.append(f"{rid}  85?        ")
                     continue
                 first.setdefault(rid, v)
-                cells.append(f"{rid} {v:5.1f}{' ↑' if v - first[rid] >= 1.0 else '  '}")
-            print("  " + "   ".join(cells))
+                cells.append(f"{rid} {v:5.1f} ({v - first[rid]:+4.1f})")
+            print(f"  {time.monotonic() - t0:5.0f}s  " + "   ".join(cells))
             if k < rounds - 1:
-                sleep(1.0)
-        print("  위치를 고정하려면 설정의 sensors.ds18b20_ids 에 [프로브1, 프로브2, 프로브3] 순서로 ID 를 적습니다.")
+                sleep(0.2)
+        print("  위치를 고정하려면 설정의 sensors.ds18b20_ids 에 [상판, 측면, 뒷면] 순서로 ID 를 적습니다.")
     return ok
 
 
@@ -335,7 +341,7 @@ def check_outputs(cfg: Config, fake: bool, assume_yes: bool, ask=input, sleep=ti
             "확인했으면 Enter: ")
     rows = []
     try:
-        for key, label, question in OUTPUTS:
+        for key, label, question, off_question in OUTPUTS:
             dev = devs.get(key)
             if dev is None:
                 rows.append((label, SKIP, "설정에서 -1"))
@@ -346,7 +352,17 @@ def check_outputs(cfg: Config, fake: bool, assume_yes: bool, ask=input, sleep=ti
             dev.off()
             sleep(0.3)
             good = answer.strip().lower().startswith("y")
-            rows.append((label, PASS if good else FAIL, "" if good else "결선, 전원, active_low 설정 확인"))
+            if not good:
+                rows.append((label, FAIL, "켜지지 않음. 결선, 전원, active_low 설정 확인"))
+                continue
+            if off_question:
+                sleep(on_s / 2)
+                released = "y" if assume_yes else ask(f"{label}: {off_question}? (y/n): ")
+                if not released.strip().lower().startswith("y"):
+                    rows.append((label, FAIL, "꺼지지 않음. 3.3 V 신호로 안 떨어지는 모듈: README 2장 하드웨어 주의 "
+                                              "(JD-VCC 분리나 트랜지스터 구동)"))
+                    continue
+            rows.append((label, PASS, ""))
     finally:
         for dev in devs.values():
             if dev is not None:
