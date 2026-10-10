@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fire-detect"
+version = "0.2.0"
+description = "소형 ESS(파워뱅크) 충전 과열 감시 (ess_01): AMG8833 열화상, SHT31, MQ-2"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = ["smbus2>=0.4", "PyYAML>=6"]
+
+[project.optional-dependencies]
+pi = ["gpiozero>=2.0", "lgpio", "luma.oled>=3.12"]   # Pi OS 에서는 apt 의 python3-gpiozero, python3-lgpio 권장
+dev = ["pytest", "jsonschema>=4.18"]
+
+[project.scripts]
+fire-detect = "fire_detect.app:main"
+
+[tool.setuptools]
+packages = ["fire_detect", "fire_detect.drivers"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

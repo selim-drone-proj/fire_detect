@@ -1,0 +1,26 @@
+# /etc/systemd/system/fire-detect.service
+#   sudo cp systemd/fire-detect.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fire-detect
+#   journalctl -u fire-detect -f          # 동작 기록 보기
+#
+# 루프가 10 초 넘게 멈추면(WatchdogSec) systemd 가 강제로 재시작한다.
+# 재시작되는 동안 GPIO 가 풀려 SSR, 릴레이가 떨어지므로 충전은 끊긴 쪽으로 간다.
+[Unit]
+Description=ESS 충전 과열 감시 (fire_detect, ess_01)
+After=multi-user.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=pi
+Group=pi
+SupplementaryGroups=i2c gpio
+RuntimeDirectory=fire-detect
+ExecStart=/home/pi/fire_detect/.venv/bin/fire-detect --config /etc/fire-detect/config.yaml
+Restart=always
+RestartSec=2
+WatchdogSec=10
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

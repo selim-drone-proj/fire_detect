@@ -1,0 +1,22 @@
+# --- 빌드 산출물, 가상환경 ---
+build/
+*.egg-info/
+.venv/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- 감지기 기록 (데이터라 저장소에 넣지 않는다) ---
+fire_logs/
+fire_*.csv
+fire_*.jsonl
+thermal_*.csv
+reset.request
+
+# --- 에디터 / OS ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
