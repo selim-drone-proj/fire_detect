@@ -265,3 +265,20 @@ def test_point_limits_work_without_any_ambient():
     assert ss[-1].level == 0                                     # 주변을 모르면 '뜨거움' 은 판단 안 함
     ss = run(eng, [Frame(t, None, None, None, 0.8, probes_c=[61.0, AMB, AMB]) for t in range(4, 8)])
     assert ss[-1].level == 3 and not ss[-1].charge_allowed       # 한계는 주변 없이도
+
+
+def test_last_raw_probe_sample_holds_danger_when_probe_burns_off():
+    """두 값 중 낮은 값(58)만 판정에 들어간 채 프로브가 끊겨도, 마지막 날값(66)으로 위험을 붙잡는다"""
+    eng = AlarmEngine(cfg())
+
+    def f(t, probe, raw, cam=AMB + 1):
+        fr = frame(t, hot=[0], temp=cam)
+        fr.probes_c, fr.probes_raw_c = [probe, AMB + 3], [raw, AMB + 3]
+        return fr
+    run(eng, [f(t, 58.0, 66.0) for t in range(4)])
+    assert eng.level == 1                                         # 판정 값 58: 주의
+    run(eng, [f(t, None, 66.0, cam=61.0) for t in range(4, 8)])   # 프로브 끊김 + 열화상이 위험 래치
+    assert eng.latched
+    eng.request_reset()
+    s = eng.update(f(8, None, 66.0))                              # 열화상은 식었지만
+    assert s.latched and "프로브1 끊김 (끊기기 전 66.0℃)" in s.reason   # 날값 66 ℃ 로 붙잡음 -> 해제 거부

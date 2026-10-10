@@ -89,6 +89,7 @@ class Frame:
     rh_pct: float | None = None
     smoke_v: float | None = None
     probes_c: list | None = None          # DS18B20 접촉 프로브 ℃ (프로브를 안 쓰면 None, 못 읽은 프로브는 None)
+    probes_raw_c: list | None = None      # 프로브마다 마지막 날값 (끊긴 순간의 유지 단계를 정할 때만 씀)
     ir_object_c: float | None = None      # MLX90614 물체 ℃
     ir_ambient_c: float | None = None     # MLX90614 센서 자체 ℃ (기록만)
     has_ir: bool = False                  # MLX90614 를 쓰는가 (못 읽은 것과 안 쓰는 것을 구분)
@@ -150,6 +151,7 @@ class AlarmEngine:
         self.last_pixels_at: float | None = None
         self.reset_requested = False
         self.point_last: dict[str, tuple[float, int]] = {}   # 점 센서별 마지막 (값, 유지 단계). 끊겼을 때 씀
+        self.point_lost: set[str] = set()         # 지금 끊겨 있는 점 센서
 
     def request_reset(self) -> None:
         """래치 해제 요청. 다음 update 에서 조건이 사라졌으면 해제, 아직이면 무시"""
@@ -168,7 +170,9 @@ class AlarmEngine:
             d = c.delta_c if c.probe_delta_c is None else c.probe_delta_c
             lim = c.abs_limit_c if c.probe_abs_limit_c is None else c.probe_abs_limit_c
             s.probe_c = [float(v) if _ok(v) else NAN for v in fr.probes_c]
-            pts += [(f"프로브{i + 1}", v, d, lim, FLAG_PROBE_INVALID) for i, v in enumerate(fr.probes_c)]
+            raw = list(fr.probes_raw_c or [])
+            raw += [None] * (len(fr.probes_c) - len(raw))
+            pts += [(f"프로브{i + 1}", v, raw[i], d, lim, FLAG_PROBE_INVALID) for i, v in enumerate(fr.probes_c)]
         if fr.has_ir:
             d = c.delta_c if c.ir_delta_c is None else c.ir_delta_c
             lim = c.abs_limit_c if c.ir_abs_limit_c is None else c.ir_abs_limit_c
@@ -176,30 +180,42 @@ class AlarmEngine:
                 s.ir_object_c = fr.ir_object_c
             if _ok(fr.ir_ambient_c):
                 s.ir_ambient_c = fr.ir_ambient_c
-            pts.append(("적외선", fr.ir_object_c, d, lim, FLAG_IR_INVALID))
+            pts.append(("적외선", fr.ir_object_c, None, d, lim, FLAG_IR_INVALID))
         amb = s.ambient_temp_c
+
+        def hold_of(v, d, lim):
+            if v >= lim - c.hysteresis_c:
+                return LEVEL_DANGER
+            if _ok(amb) and v > amb + d - c.hysteresis_c:
+                return LEVEL_CAUTION
+            return LEVEL_NORMAL
+
         inst = hold = LEVEL_NORMAL
-        for name, v, d, lim, flag in pts:
+        for name, v, raw_v, d, lim, flag in pts:
             if not _ok(v):
                 s.flags |= flag
+                if name not in self.point_lost:
+                    # 막 끊김: 마지막 날값이 판정에 쓴 값보다 뜨거웠으면 그것으로 붙잡는다 (끊긴 순간에 한 번만 정함)
+                    self.point_lost.add(name)
+                    if _ok(raw_v):
+                        h_raw = hold_of(raw_v, d, lim)
+                        last = self.point_last.get(name)
+                        if last is None or h_raw > last[1]:
+                            self.point_last[name] = (raw_v, h_raw)
                 last = self.point_last.get(name)
                 if last is not None and last[1] > LEVEL_NORMAL:
                     hold = max(hold, last[1])
                     if self.level >= last[1]:
                         why.append(f"{name} 끊김 (끊기기 전 {last[0]:.1f}℃): 단계 유지")
                 continue
+            self.point_lost.discard(name)
             if v >= lim:
                 inst = LEVEL_DANGER
                 why.append(f"{name} {v:.1f}℃ >= {lim:.0f}℃")
             elif _ok(amb) and v > amb + d:
                 inst = max(inst, LEVEL_CAUTION)
                 why.append(f"{name} {v:.1f}℃ (주변+{d:.0f}℃ 초과)")
-            if v >= lim - c.hysteresis_c:
-                h = LEVEL_DANGER
-            elif _ok(amb) and v > amb + d - c.hysteresis_c:
-                h = LEVEL_CAUTION
-            else:
-                h = LEVEL_NORMAL
+            h = hold_of(v, d, lim)
             hold = max(hold, h)
             self.point_last[name] = (v, h)
         return inst, hold

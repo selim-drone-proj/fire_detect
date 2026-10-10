@@ -123,6 +123,7 @@ class ProbeGroup:
         self.log = log
         self.last_good: dict[str, float] = {}               # 85 ℃ 판단용 직전 값
         self._prev: dict[str, float] = {}                   # 스레드: 바로 앞 값 (연속 두 값 중 낮은 값을 내놓기)
+        self.raw: dict[str, float] = {}                     # 마지막으로 읽은 날값 (끊길 때 판정이 단계를 붙잡는 데 씀)
         self.latest: dict[str, tuple[float, float]] = {}    # id -> (시각, ℃). 스레드가 채운다
         self.errors: dict[str, str] = {}                    # id -> 마지막 오류
         self.started_at: float | None = None
@@ -160,6 +161,7 @@ class ProbeGroup:
         self.ids = ids
         if self.threaded:
             if self._thread is None or not self._thread.is_alive():
+                self._prev.clear()                           # 오래된 값과 짝짓지 않게
                 self.started_at = self.clock()
                 self._thread = threading.Thread(target=self._loop, name="ds18b20", daemon=True)
                 self._thread.start()
@@ -182,6 +184,7 @@ class ProbeGroup:
         if c == POWER_ON_C and self.last_good.get(rid, -1e9) < POWER_ON_TRUST_FROM_C:
             raise IOError("85 ℃ 초기값 (변환이 안 됨: 전원, 배선 확인)")
         self.last_good[rid] = c
+        self.raw[rid] = c
         return c
 
     def _loop(self) -> None:
@@ -197,12 +200,18 @@ class ProbeGroup:
                     v = self._read_one(rid)
                 except Exception as e:                       # noqa: BLE001  스레드가 죽으면 프로브 감시가 멈춘다
                     self.errors[rid] = str(e)
+                    self._prev.pop(rid, None)                # 실패 뒤의 첫 값은 오래된 값이 아니라 다음 값과 짝짓는다
                     continue
                 prev, self._prev[rid] = self._prev.get(rid), v
                 self.errors.pop(rid, None)
                 if prev is not None:                         # 첫 값은 다음 값과 함께 쓴다
                     self.latest[rid] = (self.clock(), min(prev, v))
             self._stop.wait(max(0.05, self.period_s - (time.monotonic() - t0)))
+
+    def last_raw(self) -> list[float | None]:
+        """프로브마다 마지막으로 읽은 날값 (오래됐어도). 판정은 이것을 '끊기기 직전 값' 으로만 쓴다:
+        두 값 중 낮은 값만 내놓다 보니, 뜨거운 마지막 한 값을 남기고 끊기면 그 값이 판정에 안 들어가기 때문"""
+        return [self.raw.get(rid) if rid else None for rid in self.ids]
 
     def _fresh(self) -> list[float | None]:
         """스레드가 읽은 값 중 max_age_s 안의 것 (프로브 순서)"""

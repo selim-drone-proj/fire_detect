@@ -279,3 +279,16 @@ def test_threaded_rebegin_without_fresh_values_stays_failed():
             g.begin()                                     # 다시 연결해도 '연결됨' 이 되지 않음
     finally:
         g.close()
+
+
+def test_threaded_reader_does_not_pair_across_failures():
+    # 튄 값 - 실패 - 튄 값: 실패 전 값과 짝지으면 70 이 나와 버린다
+    w1 = ScriptedW1({A: [25.0, 25.0, 70.0, None, None, 70.0] + [25.0] * 5})
+    g = ds18b20.ProbeGroup(w1, count=1, threaded=True, period_s=0.01, max_age_s=5.0)
+    g.begin()
+    try:
+        seen = [v[0] for v in _poll(g, 0.6) if v[0] is not None]
+    finally:
+        g.close()
+    assert seen and max(seen) == 25.0
+    assert g.last_raw() == [25.0]                         # 날값은 따로 남음

@@ -125,11 +125,12 @@ class SensorHub:
         th = self._read("SHT31", lambda s: s.read())
         v = self._read("ADS1115", lambda s: s.read_volts(self.smoke_channel))
         probes = self._read_probes()
+        raw = self.slots["DS18B20"].sensor.last_raw() if probes is not None else None
         ir = self._read("MLX90614", lambda s: s.read())
         return Frame(t=self.clock() if t is None else t, pixels=pixels,
                      ambient_c=th[0] if th else None, rh_pct=th[1] if th else None,
                      smoke_v=v * self.smoke_divider if v is not None else None,
-                     probes_c=probes, has_ir="MLX90614" in self.slots,
+                     probes_c=probes, probes_raw_c=raw, has_ir="MLX90614" in self.slots,
                      ir_object_c=ir[0] if ir else None, ir_ambient_c=ir[1] if ir else None)
 
     def close(self) -> None:
