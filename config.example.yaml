@@ -6,6 +6,7 @@ i2c_bus: 1                      # /dev/i2c-1 (40핀 3번 SDA, 5번 SCL)
 period_s: 1.0                   # 판정 주기
 health_period_s: 10.0
 reset_file: /run/fire-detect/reset   # fire-detect --reset 이 이 파일을 만든다
+latch_file: /var/lib/fire-detect/latched   # 위험 래치를 남겨 재시작, 재부팅 뒤에도 이어 감 (직접 지우지 말 것)
 
 sensors:
   amg8833_address: 0x69         # 8x8 열화상 (AD_SELECT 를 GND 에 묶었으면 0x68)
@@ -32,6 +33,7 @@ alarm:                          # 아래 값은 임시. 정상 충전 로그로 
   latch_danger: true            # 위험은 사람이 해제할 때까지 유지
   cut_level: 3                  # 3 = 위험에서만 차단. 2 로 하면 경고에서도 차단
   sensor_loss_cut_s: 10.0       # 열화상 끊김 10 초면 충전 차단 (감시 불가)
+  start_hold_s: 10.0            # 켠 뒤 10 초는 충전 차단 (센서가 모두 첫 값을 낼 때까지)
   # 점 센서 기준. 비워 두면(null) 위의 delta_c, abs_limit_c 와 같음. 정상 충전 기록으로 따로 정할 때만 적는다
   probe_delta_c: null           # 접촉 프로브: 주변 + 이 값 초과면 주의
   probe_abs_limit_c: null       # 접촉 프로브: 이 값 이상이면 위험 (충전 차단)

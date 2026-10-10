@@ -14,6 +14,7 @@ fire_*.csv
 fire_*.jsonl
 thermal_*.csv
 reset.request
+latched
 
 # --- 에디터 / OS ---
 .vscode/

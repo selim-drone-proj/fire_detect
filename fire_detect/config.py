@@ -59,6 +59,7 @@ class Config:
     period_s: float = 1.0
     health_period_s: float = 10.0
     reset_file: str = "/run/fire-detect/reset"     # 이 파일이 생기면 래치 해제 요청 (fire-detect --reset)
+    latch_file: str = "/var/lib/fire-detect/latched"   # 위험 래치를 남겨 재시작, 재부팅 뒤에도 이어 감. "" 이면 안 남김
     sensors: SensorConfig = field(default_factory=SensorConfig)
     alarm: AlarmConfig = field(default_factory=AlarmConfig)
     pins: PinConfig = field(default_factory=PinConfig)
