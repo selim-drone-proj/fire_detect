@@ -62,6 +62,17 @@ sudo systemctl daemon-reload && sudo systemctl enable --now fire-detect
 journalctl -u fire-detect -f
 ```
 
+처음 세팅할 때는 부품을 하나씩 확인합니다. 서비스가 돌고 있으면 먼저 `sudo systemctl stop fire-detect`.
+
+```bash
+.venv/bin/python tools/hw_check.py i2c              # 센서 3종 응답
+.venv/bin/python tools/hw_check.py sensors --n 10   # 값이 말이 되는지 (MQ-2 는 3 분 예열)
+.venv/bin/python tools/hw_check.py outputs          # LED, 부저, DC 릴레이, SSR 을 하나씩. SSR 의 AC 쪽을 뺀 뒤에만
+.venv/bin/python tools/hw_check.py button           # 래치 해제 버튼
+```
+
+보드에서 Claude Code 로 세팅할 때는 저장소 폴더에서 `claude` 를 실행하면 `CLAUDE.md` 의 안전 규칙과 순서를 따릅니다.
+
 ## 4. 실행
 
 ```bash
@@ -100,3 +111,4 @@ python3 -m pytest tests      # moving-ver 가 옆 폴더에 있으면 기록을 
 - `test_drivers.py`: AMG8833 화소, 서미스터 형식, SHT31 CRC, ADS1115 설정 워드
 - `test_alarm.py`: 단계 상승, 잡음 무시, 히스테리시스, 래치와 해제, 연기 기준선, 센서 끊김 차단
 - `test_app.py`: 시나리오 전체 (출력, 파일, 스키마), systemd 알림, 설정 파일
+- `test_hw_check.py`: 보드 점검 도구 (가짜 하드웨어, AC 확인 없이는 출력을 켜지 않음, 끝나면 모두 끔)
