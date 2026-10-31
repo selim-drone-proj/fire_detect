@@ -1,6 +1,7 @@
 """보조배터리 벤치 구성 (config.battery.yaml) 과 기록 보기 도구 (tools/live_view.py, tools/plot_log.py)"""
 from __future__ import annotations
 
+import csv
 import importlib.util
 import sys
 from pathlib import Path
@@ -72,3 +73,24 @@ def test_hw_check_outputs_skips_without_pins(capsys):
     asked = []
     assert hw.main(["outputs", "--fake", "--config", BATTERY], ask=lambda q: asked.append(q) or "") == 0
     assert not asked and "건너뜁니다" in capsys.readouterr().out
+
+
+def test_mq2_check_fake_run(tmp_path, capsys):
+    mq = tool("mq2_check")
+    assert mq.main(["--fake", "--minutes", "4", "--speed", "0", "--out", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "채널 한 번씩" in out and "예열 중" in out and "안정" in out
+    rows = list(csv.DictReader(open(next(tmp_path.glob("mq2_*.csv")), encoding="utf-8")))
+    assert len(rows) == 240 and abs(float(rows[-1]["ao_v"]) - 0.80) < 0.05
+
+
+def test_mq2_check_diagnose_and_status():
+    mq = tool("mq2_check")
+    assert "분압" in mq.diagnose(3.30, 4.95)
+    assert "전원" in mq.diagnose(0.0, 0.0)
+    assert mq.diagnose(0.53, 0.80) == ""
+    assert mq.status(10, 2.0, None, None) == "예열 중"
+    assert mq.status(300, 1.2, 0.8, 0.0) == "올라감"
+    assert mq.status(300, 0.8, 0.8, -20.0) == "내려가는 중"
+    assert mq.status(300, 0.8, 0.8, 2.0) == "안정"
+    assert abs(mq.slope_mv_per_min([(0, 1.0), (60, 1.01)]) - 10.0) < 1e-6

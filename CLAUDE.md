@@ -56,6 +56,7 @@
 - 아래 세팅 순서 중 3 단계의 `dtoverlay=w1-gpio` 는 DS18B20 을 달 때만, 9 단계(출력)와 12 단계의 비상 끄기는 건너뛴다.
   10, 11 단계(설정 복사, 서비스)는 사람이 전원을 꽂으면 저절로 돌기를 원할 때만, 복사할 파일은 `config.battery.yaml`.
 - 값 보기는 `tools/live_view.py`, 그래프는 `tools/plot_log.py` (python3-matplotlib).
+  센서를 하나씩 붙일 때 MQ-2 는 `tools/mq2_check.py --config config.battery.yaml` 로 먼저 확인한다 (BATTERY_BENCH.md 2-1).
 - 안전 규칙 2, 3, 6, 7 은 그대로 지킨다. 결선 변경은 사람이 보조배터리를 뺀 뒤에 한다.
 
 ## 세팅 순서

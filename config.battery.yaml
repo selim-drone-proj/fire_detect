@@ -5,6 +5,8 @@
 # 같은 폴더의 기록을 다른 터미널에서 보기:
 #   .venv/bin/python tools/live_view.py
 #   .venv/bin/python tools/plot_log.py            (그래프 PNG)
+# MQ-2 만 먼저 볼 때 (fire-detect 없이):
+#   .venv/bin/python tools/mq2_check.py --config config.battery.yaml
 #
 # 판정 단계(0 정상 ~ 3 위험)는 그대로 계산해서 기록에 남지만, 끊을 것이 없으므로 아무것도 차단하지 않는다.
 # 기록의 charge_allowed, dc_allowed 열은 "220 V 구성이었다면 충전을 허용했을지" 로 읽으면 된다.
