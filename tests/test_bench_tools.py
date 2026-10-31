@@ -123,3 +123,58 @@ def test_mq2_check_diagnose_and_status():
     assert mq.status(300, 0.8, 0.8, -20.0) == "내려가는 중"
     assert mq.status(300, 0.8, 0.8, 2.0) == "안정"
     assert abs(mq.slope_mv_per_min([(0, 1.0), (60, 1.01)]) - 10.0) < 1e-6
+
+
+def test_bench_test_fake_full_run(tmp_path, capsys):
+    bt = tool("bench_test")
+    assert bt.main(["--fake", "--out", str(tmp_path)]) == 0
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "실패 0" in report
+    for step in ("baseline", "caution", "warning", "clear", "hot", "gas", "logs"):
+        assert f"| {step} |" in report
+    assert "뜨거울 때 해제 요청은 무시 | 통과" in report and "가스가 빠짐 | 통과" in report
+    assert list((tmp_path / "plots").glob("*.png"))
+
+
+def test_bench_test_reports_led_failure(tmp_path, monkeypatch, capsys):
+    bt = tool("bench_test")
+    orig = bt.FakeHuman.__init__
+    monkeypatch.setattr(bt.FakeHuman, "__init__",
+                        lambda self, world, answers=None: orig(self, world, {"led_yellow": False}))
+    assert bt.main(["--fake", "--out", str(tmp_path), "--skip", "hot,gas"]) == 1
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "LED: 주의 = 황색 | 실패" in report and "hot 단계 | 건너뜀" in report
+
+
+def test_bench_test_quit_still_writes_report(tmp_path, monkeypatch, capsys):
+    bt = tool("bench_test")
+    orig = bt.FakeHuman.do
+
+    def do(self, key, text, skippable=False):
+        if key == "hand_near":
+            raise bt.Quit()
+        return orig(self, key, text, skippable)
+    monkeypatch.setattr(bt.FakeHuman, "do", do)
+    assert bt.main(["--fake", "--out", str(tmp_path)]) == 0
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "중단" in report and "| logs |" in report and "| warning |" not in report
+
+
+def test_bench_test_bad_skip(tmp_path, capsys):
+    assert tool("bench_test").main(["--fake", "--out", str(tmp_path), "--skip", "nope"]) == 2
+
+
+def test_bench_test_flags_missing_sht31(tmp_path, monkeypatch, capsys):
+    bt = tool("bench_test")
+    orig = bt.FakeWorld.__init__
+
+    def init(self, scen, seed=7):
+        orig(self, scen, seed)
+
+        def boom():
+            raise OSError("응답 없음")
+        scen.ambient = boom
+    monkeypatch.setattr(bt.FakeWorld, "__init__", init)
+    assert bt.main(["--fake", "--out", str(tmp_path), "--skip", "hot,gas"]) == 1
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "SHT31 온습도 | 실패" in report and "열화상 최저 화소" in report
