@@ -328,6 +328,10 @@ def check_sensors(cfg: Config, bus, n: int, sleep=time.sleep, w1=None) -> bool:
 
 def check_outputs(cfg: Config, fake: bool, assume_yes: bool, ask=input, sleep=time.sleep, on_s: float = 2.0,
                   log: list | None = None) -> bool:
+    p = cfg.pins
+    if all(pin < 0 for pin in (p.ssr, p.dc_relay, p.buzzer, p.led_red, p.led_yellow, p.led_green)):
+        print("설정에 출력 핀이 하나도 없음 (보조배터리 벤치 구성 등). 출력 시험을 건너뜁니다.")
+        return True
     print("출력 시험. SSR 은 파워뱅크 충전 AC 라인을 켜고 끄는 장치입니다.")
     print("SSR 의 AC 쪽 결선을 빼 두었을 때만 진행하십시오. 220 V 결선 작업은 사람이 합니다.")
     if not assume_yes:

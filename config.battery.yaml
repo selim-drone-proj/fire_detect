@@ -1,0 +1,65 @@
+# 보조배터리 벤치 구성 (2026-10-31): 220 V, SSR, DC 릴레이, 부저, LED 없이 센서 읽기, 판정, 기록만 한다.
+# Pi 5 는 USB-C 보조배터리로 켜고, 센서는 AMG8833 열화상, SHT31 온습도, ADS1115 + MQ-2 연기 세 가지.
+# 결선과 순서는 docs/BATTERY_BENCH.md. 실행:
+#   .venv/bin/fire-detect --config config.battery.yaml
+# 같은 폴더의 기록을 다른 터미널에서 보기:
+#   .venv/bin/python tools/live_view.py
+#   .venv/bin/python tools/plot_log.py            (그래프 PNG)
+#
+# 판정 단계(0 정상 ~ 3 위험)는 그대로 계산해서 기록에 남지만, 끊을 것이 없으므로 아무것도 차단하지 않는다.
+# 기록의 charge_allowed, dc_allowed 열은 "220 V 구성이었다면 충전을 허용했을지" 로 읽으면 된다.
+
+device_id: ess_01
+i2c_bus: 1
+period_s: 1.0
+health_period_s: 10.0
+reset_file: /tmp/fire-detect/reset   # fire-detect --config config.battery.yaml --reset 이 이 파일을 만든다
+latch_file: ""                       # 벤치에서는 래치를 파일로 남기지 않음 (끊을 출력이 없고 /var/lib 권한도 필요 없게)
+
+sensors:
+  amg8833_address: 0x69         # AD_SELECT 를 GND 에 묶은 보드면 0x68
+  sht31_address: 0x44           # ADDR 을 VCC 에 묶은 보드면 0x45
+  ads1115_address: 0x48         # ADDR 을 GND 에. ADS1115 는 3.3 V 로 켤 것
+  smoke_channel: 0              # A0
+  smoke_divider: 1.5            # MQ-2 AO -> 10 kΩ -> A0 -> 20 kΩ -> GND
+  # 다른 열 센서를 나중에 더할 때 (docs/BATTERY_BENCH.md 6장):
+  #   MLX90614 적외선: 아래를 0x5A 로
+  #   DS18B20 접촉 프로브: ds18b20_count 를 개수로, /boot/firmware/config.txt 에 dtoverlay=w1-gpio
+  mlx90614_address: -1
+  ds18b20_count: 0
+  ds18b20_ids: []
+  retry_s: 10.0
+
+alarm:                          # config.example.yaml 과 같은 임시값. 기록이 모이면 tools/analyze_log.py 로 다시 정한다
+  delta_c: 8.0
+  hysteresis_c: 1.5
+  warning_pixels: 3
+  abs_limit_c: 60.0
+  smoke_dv: 0.30
+  smoke_warmup_s: 180.0
+  smoke_tau_s: 600.0
+  confirm_s: 2.0
+  clear_s: 10.0
+  latch_danger: true
+  cut_level: 3
+  sensor_loss_cut_s: 10.0
+  start_hold_s: 10.0
+
+pins:                           # 출력은 하나도 달지 않음. 나중에 LED, 부저를 달면 config.example.yaml 의 번호로
+  ssr: -1
+  dc_relay: -1
+  buzzer: -1
+  led_red: -1
+  led_yellow: -1
+  led_green: -1
+  reset_button: -1
+
+log:
+  dir: ~/fire_logs
+  jsonl_every_s: 10.0
+  thermal: true                 # thermal_YYYYmmdd.csv (화소 64 개, 하루 약 30 MB)
+  keep_days: 60
+
+display:
+  enabled: false                # OLED 를 달면 true
+  address: 0x3C
