@@ -1,4 +1,4 @@
-# 보조배터리 벤치 구성 (2026-10-31): 220 V, SSR, DC 릴레이, 부저, LED 없이 센서 읽기, 판정, 기록만 한다.
+# 보조배터리 벤치 구성 (2026-10-31): 220 V, SSR, DC 릴레이 없이 센서 읽기, 판정, 기록, LED 와 부저 표시만 한다.
 # Pi 5 는 USB-C 보조배터리로 켜고, 센서는 AMG8833 열화상, SHT31 온습도, ADS1115 + MQ-2 연기 세 가지.
 # 결선과 순서는 docs/BATTERY_BENCH.md. 실행:
 #   .venv/bin/fire-detect --config config.battery.yaml
@@ -8,7 +8,7 @@
 # MQ-2 만 먼저 볼 때 (fire-detect 없이):
 #   .venv/bin/python tools/mq2_check.py --config config.battery.yaml
 #
-# 판정 단계(0 정상 ~ 3 위험)는 그대로 계산해서 기록에 남지만, 끊을 것이 없으므로 아무것도 차단하지 않는다.
+# 판정 단계(0 정상 ~ 3 위험)는 그대로 계산해 기록하고 LED, 부저로 알리지만, 끊을 것이 없으므로 아무것도 차단하지 않는다.
 # 기록의 charge_allowed, dc_allowed 열은 "220 V 구성이었다면 충전을 허용했을지" 로 읽으면 된다.
 
 device_id: ess_01
@@ -47,14 +47,15 @@ alarm:                          # config.example.yaml 과 같은 임시값. 기�
   sensor_loss_cut_s: 10.0
   start_hold_s: 10.0
 
-pins:                           # 출력은 하나도 달지 않음. 나중에 LED, 부저를 달면 config.example.yaml 의 번호로
+pins:                           # BCM 번호. 220 V 쪽(SSR, DC 릴레이)은 없음. LED, 부저 결선은 docs/BATTERY_BENCH.md 2-2
   ssr: -1
   dc_relay: -1
-  buzzer: -1
-  led_red: -1
-  led_yellow: -1
-  led_green: -1
-  reset_button: -1
+  buzzer: 22                    # (핀 15) 2N3904 를 거쳐 5 V 능동 부저. 안 달았거나 조용히 하려면 -1
+  led_red: 5                    # (핀 29) 신호등 LED 모듈 R
+  led_yellow: 6                 # (핀 31) Y
+  led_green: 13                 # (핀 33) G, 모듈 GND 는 핀 30
+  reset_button: -1              # 래치 해제 버튼을 달면 26 (핀 37, GND 로 누름)
+  buzzer_active_low: false
 
 log:
   dir: ~/fire_logs
