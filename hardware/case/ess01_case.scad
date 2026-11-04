@@ -438,4 +438,5 @@ else if (part == "fit_test") fit_test();
 else if (part == "clearance_box") clearance_box();
 else if (part == "clearance_lid") clearance_lid();
 else if (part == "clearance_head") clearance_head();
+else if (part == "none") { }
 else assembly();
