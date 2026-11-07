@@ -53,6 +53,12 @@ class DisplayConfig:
 
 
 @dataclass
+class IngestConfig:
+    url: str = ""                   # 서버 수신 주소 (예: http://221.159.102.58:8070/api/ingest). "" 이면 안 보냄
+    token_file: str = "/etc/fire-detect/ingest_token"   # Bearer 토큰 한 줄. 권한 600
+
+
+@dataclass
 class Config:
     device_id: str = "ess_01"
     i2c_bus: int = 1
@@ -65,6 +71,7 @@ class Config:
     pins: PinConfig = field(default_factory=PinConfig)
     log: LogConfig = field(default_factory=LogConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    ingest: IngestConfig = field(default_factory=IngestConfig)
 
 
 def _build(cls, data: dict | None, where: str):
@@ -76,7 +83,7 @@ def _build(cls, data: dict | None, where: str):
     kw = {}
     for name, val in data.items():
         sub = {"sensors": SensorConfig, "alarm": AlarmConfig, "pins": PinConfig,
-               "log": LogConfig, "display": DisplayConfig}.get(name) if cls is Config else None
+               "log": LogConfig, "display": DisplayConfig, "ingest": IngestConfig}.get(name) if cls is Config else None
         kw[name] = _build(sub, val, f"{where}.{name}") if sub else val
     return cls(**kw)
 
