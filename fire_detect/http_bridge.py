@@ -16,6 +16,7 @@ from __future__ import annotations
 import collections
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -61,9 +62,11 @@ class HttpBridge:
             with self.cv:
                 room = self.queue.maxlen - len(self.queue)
                 self.queue.extendleft(reversed(recs[len(recs) - room:] if room < len(recs) else recs))
+                deadline = time.monotonic() + self.retry_s       # publish() 의 notify 로 일찍 깨도 retry_s 를 채운다
+                while not self.stopping and (left := deadline - time.monotonic()) > 0:
+                    self.cv.wait(left)
                 if self.stopping:
                     return
-                self.cv.wait(self.retry_s)
 
     def _post(self, recs: list) -> bool:
         """True = 끝남 (보냄 또는 버림), False = 다시 보내야 함"""

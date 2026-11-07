@@ -106,3 +106,17 @@ def test_publish_never_blocks_when_server_is_down():
     assert wait_for(lambda: any("연결 실패" in m for m in logs))
     assert len(b.queue) <= 5                                          # 오래된 것부터 버려 상한 유지
     b.close(wait_s=1.0)
+
+
+def test_waits_retry_interval_even_while_records_arrive():
+    srv = FakeServer(codes=[503] * 100)
+    b = HttpBridge(srv.url, "tok", log=lambda m: None, retry_s=0.5)
+    try:
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.2:                           # 판정 루프처럼 계속 publish (notify)
+            b.publish(rec(int((time.monotonic() - t0) * 10) % 60))
+            time.sleep(0.02)
+        assert 2 <= len(srv.got) <= 3                                 # 0 초, 0.5 초, 1.0 초 (notify 마다 다시 보내지 않음)
+    finally:
+        b.close(wait_s=1.0)
+        srv.close()
