@@ -25,6 +25,8 @@ alarm.py - 과열, 연기 판정 (하드웨어와 무관한 순수 로직. tests
   - 연기 기준 전압은 정상 단계에서만 천천히 학습 (불이 났을 때 기준이 따라 올라가지 않게)
 
 안전 쪽 동작: 열화상을 sensor_loss_cut_s(10 초) 넘게 못 읽으면 감시 불가로 보고 충전을 끊는다.
+켠 뒤 start_hold_s(10 초) 동안도 끊어 둔다 (센서가 모두 첫 값을 내고 확인 시간이 지날 때까지).
+위험 래치는 app.py 가 파일로 남겨 재시작 뒤에도 이어 간다 (restore_latch).
 점 센서는 보조라서 끊겨도 충전을 끊지 않는다 (flags 로 알림). 다만 끊기기 직전 값이 뜨거웠으면
 그 값이 그대로라고 보고 단계를 내리지 않는다 (열에 타서 끊긴 것일 수 있음). 위험 래치도 풀리지 않는다.
 
@@ -66,6 +68,7 @@ class AlarmConfig:
     latch_danger: bool = True          # 위험 단계 래치
     cut_level: int = LEVEL_DANGER      # 이 단계 이상이면 충전 차단
     sensor_loss_cut_s: float = 10.0    # 열화상 끊김이 이만큼 계속되면 충전 차단
+    start_hold_s: float = 10.0         # 켠 뒤 이 시간 동안은 충전 차단 (센서가 모두 첫 값을 낼 때까지)
     # 점 센서 기준. None 이면 위의 delta_c, abs_limit_c 와 같음 (정상 충전 기록으로 따로 정할 수 있게)
     probe_delta_c: float | None = None       # 접촉 프로브(DS18B20) 뜨거움: 주변 + 이 값 초과
     probe_abs_limit_c: float | None = None   # 접촉 프로브 위험 한계
@@ -152,10 +155,17 @@ class AlarmEngine:
         self.reset_requested = False
         self.point_last: dict[str, tuple[float, int]] = {}   # 점 센서별 마지막 (값, 유지 단계). 끊겼을 때 씀
         self.point_lost: set[str] = set()         # 지금 끊겨 있는 점 센서
+        self.restored = False                     # 재시작 전 래치를 이어 받음 (해제되면 False)
 
     def request_reset(self) -> None:
         """래치 해제 요청. 다음 update 에서 조건이 사라졌으면 해제, 아직이면 무시"""
         self.reset_requested = True
+
+    def restore_latch(self) -> None:
+        """재시작 전에 걸려 있던 위험 래치를 이어 간다 (사람이 해제할 때까지 위험, 충전 차단)"""
+        self.level = LEVEL_DANGER
+        self.latched = True
+        self.restored = True
 
     def _points(self, fr: Frame, s: Status, why: list) -> tuple[int, int]:
         """점 센서(접촉 프로브, 적외선) -> (즉시 단계, 유지 단계). 위험 한계 이상이면 3, 뜨거우면 1.
@@ -324,10 +334,13 @@ class AlarmEngine:
 
         if self.level == LEVEL_DANGER and c.latch_danger:
             self.latched = True
+        if self.restored and self.latched:
+            why.append("재시작 전 위험 래치를 이어 감")
         if self.reset_requested:
             self.reset_requested = False
             if self.latched and hold < LEVEL_DANGER:
                 self.latched = False
+                self.restored = False
                 self.level = hold
                 why.append("수동 해제")
             elif self.latched:
@@ -345,9 +358,12 @@ class AlarmEngine:
         s.fault = fr.t - self.last_pixels_at >= c.sensor_loss_cut_s
         if s.fault:
             why.append(f"열화상 {fr.t - self.last_pixels_at:.0f}초 끊김: 감시 불가로 충전 차단")
+        starting = fr.t - self.started_at < c.start_hold_s
+        if starting:
+            why.append(f"켠 직후 {c.start_hold_s:.0f}초는 충전 차단")
         s.level = self.level
         s.latched = self.latched
-        cut = self.level >= c.cut_level or s.fault
+        cut = self.level >= c.cut_level or s.fault or starting
         s.charge_allowed = s.dc_allowed = not cut
         s.buzzer_on = self.level >= LEVEL_WARNING
         s.reason = "; ".join(why)
