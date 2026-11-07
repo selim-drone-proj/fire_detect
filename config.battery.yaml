@@ -66,3 +66,7 @@ log:
 display:
   enabled: false                # OLED 를 달면 true
   address: 0x3C
+
+ingest:                         # 서버로 보내기 (fire_status 1 초마다, device_health 10 초마다). 감지는 보내기와 상관없이 동작
+  url: http://221.159.102.58:8070/api/ingest
+  token_file: ~/.config/fire-detect/ingest_token   # 토큰 한 줄 (chmod 600). 파일이 없으면 보내지 않고 감시만 한다

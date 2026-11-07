@@ -1,5 +1,5 @@
 """
-app.py - 화재 감지기 본체 (ess_01). 1 초마다: 센서 읽기 -> 판정 -> 출력 -> 기록 -> (선택) ROS 2 발행
+app.py - 화재 감지기 본체 (ess_01). 1 초마다: 센서 읽기 -> 판정 -> 출력 -> 기록 -> (선택) ROS 2 발행, 서버 송신
 
     fire-detect --config /etc/fire-detect/config.yaml          # 실제 장비 (systemd 서비스로 상시 실행)
     fire-detect --simulate overheat --speed 50 --out /tmp/fire  # 하드웨어 없이 (가짜 센서, 가짜 출력)
@@ -310,6 +310,17 @@ def build(cfg: Config, simulate: str | None, out: str | None, ros: bool, log=pri
     if ros:
         from .ros_bridge import RosBridge
         bridge = RosBridge(cfg.device_id)
+    if cfg.ingest.url and not simulate:                         # 시뮬레이션 기록은 서버로 보내지 않는다
+        from .http_bridge import HttpBridge, Tee
+        try:
+            with open(os.path.expanduser(cfg.ingest.token_file), encoding="utf-8") as f:
+                token = f.read().strip()
+        except OSError as e:                                    # 토큰이 없어도 감시는 시작한다
+            log(f"서버 송신 없이 동작 (토큰 파일을 못 읽음): {e}")
+        else:
+            http = HttpBridge(cfg.ingest.url, token, log=log)
+            log(f"서버 송신: {cfg.ingest.url}")
+            bridge = Tee(http, bridge) if bridge else http
     app = FireApp(cfg, hub, outputs, logger, display, bridge, clock=clock, wall=wall,
                   simulated=bool(simulate), clock_synced=(lambda: True) if simulate else system_info.clock_synced,
                   log=log, gpio_ok=gpio_ok)

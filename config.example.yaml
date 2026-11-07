@@ -61,3 +61,7 @@ log:
 display:
   enabled: true                 # SSD1306 OLED. 없으면 자동으로 꺼짐
   address: 0x3C
+
+ingest:                         # (선택) 서버로 보내기. url 을 비우면 안 보냄. 감지와 차단은 보내기와 상관없이 동작
+  url: ""                       # 예: http://221.159.102.58:8070/api/ingest
+  token_file: /etc/fire-detect/ingest_token   # Bearer 토큰 한 줄. 서비스 사용자(pi)만 읽게 (README 7장). 채팅, 커밋에 넣지 말 것

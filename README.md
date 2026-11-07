@@ -163,3 +163,24 @@ python3 -m pytest tests      # moving-ver 가 옆 폴더에 있으면 기록을 
   점 센서(주의, 위험, 따로 정한 기준, 끊김은 차단 안 함, 뜨거울 때 끊기면 단계와 래치 유지)
 - `test_app.py`: 시나리오 전체 (출력, 파일, 스키마, 뒷면 발열), CSV 열 바뀜, 프로브 빠짐 = DEGRADED, systemd 알림, 설정 파일
 - `test_hw_check.py`: 보드 점검 도구 (가짜 하드웨어, AC 확인 없이는 출력을 켜지 않음, 끝나면 모두 끔, 프로브 개수와 ID)
+
+## 7. 서버로 보내기 (선택)
+
+설정 `ingest.url` 이 있으면 판정 기록을 서버 `/api/ingest` 로 HTTP POST 합니다 (`fire_detect/http_bridge.py`, 표준 라이브러리만 씀).
+보내는 것은 규격 v0.2 기록 그대로입니다: `fire_status` 1 초마다 (주변 온습도, 열화상 최고, 평균, 최저와 화소 64 개, 뜨거운 화소 수,
+MQ-2 전압과 기준선, 단계, 래치), `device_health` 10 초마다 (상태, 전원 전압, CPU 온도, 오류 메시지).
+**감지와 차단은 보내기와 상관없습니다.** 보내기는 별도 스레드에서 하고, 서버가 끊기면 최근 600 건(약 10 분)을 두었다가 다시 보냅니다.
+토큰 파일이 없으면 보내지 않고 감시만 합니다. 시뮬레이션(`--simulate`)은 보내지 않습니다.
+
+```bash
+# 토큰은 서버 담당에게 따로 받아 보드 터미널에서만 넣는다 (채팅, 커밋 금지)
+mkdir -p ~/.config/fire-detect && install -m 600 /dev/null ~/.config/fire-detect/ingest_token
+nano ~/.config/fire-detect/ingest_token            # 토큰 한 줄
+.venv/bin/fire-detect --config config.battery.yaml # 시작 문구에 "서버 송신: http://..." 가 나오면 켜진 것
+
+# systemd 로 돌릴 때 (/etc/fire-detect/config.yaml 의 ingest.url 을 채우고)
+sudo install -m 600 -o pi -g pi /dev/null /etc/fire-detect/ingest_token && sudo nano /etc/fire-detect/ingest_token
+```
+
+송신 오류는 처음 한 번과 내용이 바뀔 때만 journal 에 "서버 송신 오류: ..." 로 남고, 되살아나면 "서버 송신 정상" 이 남습니다.
+`device_id` 가 서버 대시보드의 시험체 ID 이므로 장치마다 다르게, 시각은 NTP 로 맞춥니다 (서버가 `stamp` 로 중복을 거릅니다).
