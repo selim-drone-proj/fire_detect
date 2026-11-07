@@ -5,6 +5,8 @@
 판정 결과는 규격 v0.2 의 FireStatus, DeviceHealth 기록으로 남기고 (선택) ROS 2 로 보냅니다.
 데이터 형식: [moving-ver/docs/DATA_SPEC.md 4.5](../moving-ver/docs/DATA_SPEC.md).
 
+> 220 V 없이 보조배터리로 센서 값만 받고 기록, 그래프를 보는 벤치 구성은 [docs/BATTERY_BENCH.md](docs/BATTERY_BENCH.md) (`config.battery.yaml`, `tools/live_view.py`, `tools/plot_log.py`).
+
 **감지와 차단은 ROS, 네트워크 없이 이 Pi 하나에서 완결됩니다.** ROS 는 대시보드로 보내는 통로일 뿐입니다.
 
 ## 1. 판정

@@ -6,6 +6,7 @@ hw_check.py - 화재 감지기(ess_01) 보드를 처음 꾸릴 때 부품을 하
     python3 tools/hw_check.py w1 --n 20          #   + 20 바퀴(약 50 초) 프로브 온도를 보여 줌 (하나씩 손으로 쥐어 위치 구별)
     python3 tools/hw_check.py sensors --n 10     # 센서를 모두 10 번 읽고 값이 말이 되는지
     python3 tools/hw_check.py outputs            # LED, 부저, DC 릴레이, SSR 을 하나씩 켰다 끔 (사람이 보고 답함)
+                                                 #   SSR, DC 릴레이가 설정에 없으면 AC 확인 없이 LED, 부저만
     python3 tools/hw_check.py button             # 래치 해제 버튼 (30 초 기다림)
     python3 tools/hw_check.py all                # i2c + w1 + sensors (출력은 따로 돌릴 것)
       --config FILE   주소와 핀을 설정 파일에서 (기본: /etc/fire-detect/config.yaml 이 있으면 그것)
@@ -15,6 +16,7 @@ hw_check.py - 화재 감지기(ess_01) 보드를 처음 꾸릴 때 부품을 하
   - fire-detect 서비스가 돌고 있으면 같은 GPIO 를 잡고 있다. 먼저 sudo systemctl stop fire-detect.
     서비스가 멈춰 있는 동안은 출력이 풀려 충전이 끊긴 상태다 (안전 쪽).
   - outputs 는 SSR 을 2 초 켠다. SSR 의 AC 쪽(파워뱅크 충전 라인)을 반드시 빼 두고 돌릴 것.
+    (SSR, DC 릴레이 핀이 -1 인 보조배터리 벤치 구성은 묻지 않음)
   - 끝나면 오류가 나도 모든 출력을 끈다.
 종료 코드: 0 모두 통과, 1 실패가 있음, 2 시작하지 못함
 """
@@ -328,14 +330,29 @@ def check_sensors(cfg: Config, bus, n: int, sleep=time.sleep, w1=None) -> bool:
 
 def check_outputs(cfg: Config, fake: bool, assume_yes: bool, ask=input, sleep=time.sleep, on_s: float = 2.0,
                   log: list | None = None) -> bool:
-    print("출력 시험. SSR 은 파워뱅크 충전 AC 라인을 켜고 끄는 장치입니다.")
-    print("SSR 의 AC 쪽 결선을 빼 두었을 때만 진행하십시오. 220 V 결선 작업은 사람이 합니다.")
-    if not assume_yes:
-        if ask(f"SSR 의 AC 쪽을 뺐으면 '{AC_CONFIRM}' 라고 입력: ").strip() != AC_CONFIRM:
-            print("확인이 없어 출력 시험을 하지 않습니다.")
-            return False
+    p = cfg.pins
+    if all(pin < 0 for pin in (p.ssr, p.dc_relay, p.buzzer, p.led_red, p.led_yellow, p.led_green)):
+        print("설정에 출력 핀이 하나도 없음 (보조배터리 벤치 구성 등). 출력 시험을 건너뜁니다.")
+        return True
+    if p.ssr >= 0 or p.dc_relay >= 0:
+        print("출력 시험. SSR 은 파워뱅크 충전 AC 라인을 켜고 끄는 장치입니다.")
+        print("SSR 의 AC 쪽 결선을 빼 두었을 때만 진행하십시오. 220 V 결선 작업은 사람이 합니다.")
+        if not assume_yes:
+            if ask(f"SSR 의 AC 쪽을 뺐으면 '{AC_CONFIRM}' 라고 입력: ").strip() != AC_CONFIRM:
+                print("확인이 없어 출력 시험을 하지 않습니다.")
+                return False
+    else:
+        print("출력 시험 (LED, 부저만. SSR, DC 릴레이는 설정에 없음)")
     log = log if log is not None else []
-    devs = open_outputs(cfg, fake, log)
+    try:
+        devs = open_outputs(cfg, fake, log)
+    except Exception as e:                                  # noqa: BLE001  권한, gpiochip 문제를 사람이 읽을 말로
+        print(f"GPIO 를 열 수 없음: {e}")
+        print("  1) id 에 gpio 그룹이 있는지, ls -l /dev/gpiochip* 가 그룹 gpio 인지 (CLAUDE.md 세팅 4 단계)")
+        print("  2) Pi 5 + gpiozero 2.0.1 은 /dev/gpiochip4 를 연다. gpiodetect 에서 pinctrl-rp1 이 몇 번인지 확인")
+        print("     (docs/BATTERY_BENCH.md 2-2)")
+        print("  3) fire-detect 서비스가 돌고 있으면 sudo systemctl stop fire-detect")
+        return False
     if not assume_yes:
         ask("지금 모든 출력이 꺼져 있어야 합니다. 이미 딸깍 붙어 있거나 켜진 것이 있으면 active_low 설정이 반대입니다. "
             "확인했으면 Enter: ")

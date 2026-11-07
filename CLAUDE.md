@@ -48,6 +48,20 @@
 - OS 는 Ubuntu Server 24.04 (64-bit, 권장, 드론 Pi 와 같음) 또는 Raspberry Pi OS (64-bit). `cat /etc/os-release` 로 먼저 확인한다.
 - Pi 5 에서는 RPi.GPIO 가 동작하지 않는다. gpiozero 2.x + lgpio 만 쓴다.
 
+## 보조배터리 벤치 구성 (2026-10-31~)
+
+지금 보드는 220 V 없이 USB-C 보조배터리로 켜고 AMG8833, SHT31, ADS1115 + MQ-2 와 신호등 LED, 부저만 단 구성이다
+(SSR, DC 릴레이, 버튼 없음).
+사람이 이 구성이라고 하거나 `/etc/fire-detect/config.yaml` 이 없고 SSR 이 안 달려 있으면 `docs/BATTERY_BENCH.md` 를 따른다.
+- 설정은 `config.battery.yaml`. hw_check, fire-detect 에 `--config config.battery.yaml` 을 붙인다.
+- 아래 세팅 순서 중 3 단계의 `dtoverlay=w1-gpio` 는 DS18B20 을 달 때만, 12 단계의 비상 끄기는 건너뛴다.
+  9 단계(출력)는 LED, 부저만이라 안전 규칙 1 의 AC 확인 없이 돈다. 4 단계 전에 BATTERY_BENCH.md 2-2 다 (gpiochip4 별칭) 를 본다.
+  10, 11 단계(설정 복사, 서비스)는 사람이 전원을 꽂으면 저절로 돌기를 원할 때만, 복사할 파일은 `config.battery.yaml`.
+- 값 보기는 `tools/live_view.py`, 그래프는 `tools/plot_log.py` (python3-matplotlib).
+  센서를 하나씩 붙일 때 MQ-2 는 `tools/mq2_check.py --config config.battery.yaml` 로 먼저 확인한다 (BATTERY_BENCH.md 2-1).
+  다 붙인 뒤 전체 기능 시험은 `tools/bench_test.py` (사람이 손, 물컵, 가스를 대고 LED, 부저를 보고 답함, 결과 report.md).
+- 안전 규칙 2, 3, 6, 7 은 그대로 지킨다. 결선 변경은 사람이 보조배터리를 뺀 뒤에 한다.
+
 ## 세팅 순서
 
 단계마다 실행한 명령과 결과를 짧게 보여 주고, 실패하면 다음 단계로 넘어가지 않는다.
