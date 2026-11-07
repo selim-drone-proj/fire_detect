@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fire-detect"
-version = "0.2.0"
-description = "소형 ESS(파워뱅크) 충전 과열 감시 (ess_01): AMG8833 열화상, SHT31, MQ-2"
+version = "0.2.1"
+description = "소형 ESS(파워뱅크) 충전 과열 감시 (ess_01): AMG8833 열화상, DS18B20 접촉 프로브, MLX90614 적외선, SHT31, MQ-2"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 dependencies = ["smbus2>=0.4", "PyYAML>=6"]

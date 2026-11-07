@@ -13,6 +13,10 @@ sensors:
   ads1115_address: 0x48         # MQ-2 연기 아날로그 (ADS1115 는 3.3 V 로 켤 것)
   smoke_channel: 0              # A0
   smoke_divider: 1.5            # MQ-2 AO -> 10 kΩ -> A0 -> 20 kΩ -> GND 분압이면 1.5
+  mlx90614_address: 0x5A        # 적외선 온도계 (GY-906). 안 달았으면 -1
+  ds18b20_count: 3              # 접촉 온도 프로브 개수 (1-Wire, BCM 4, dtoverlay=w1-gpio). 안 달았으면 0
+  ds18b20_ids: []               # 비우면 찾은 ID 순서. 위치를 고정하려면 hw_check.py w1 로 확인한 뒤
+                                #   ["28-상판ID", "28-측면ID", "28-뒷면ID"] 처럼 적는다 (개수는 이 목록 길이)
   retry_s: 10.0                 # 끊긴 센서 다시 연결 시도 간격
 
 alarm:                          # 아래 값은 임시. 정상 충전 로그로 tools/analyze_log.py 를 돌려 다시 정할 것
@@ -28,6 +32,11 @@ alarm:                          # 아래 값은 임시. 정상 충전 로그로 
   latch_danger: true            # 위험은 사람이 해제할 때까지 유지
   cut_level: 3                  # 3 = 위험에서만 차단. 2 로 하면 경고에서도 차단
   sensor_loss_cut_s: 10.0       # 열화상 끊김 10 초면 충전 차단 (감시 불가)
+  # 점 센서 기준. 비워 두면(null) 위의 delta_c, abs_limit_c 와 같음. 정상 충전 기록으로 따로 정할 때만 적는다
+  probe_delta_c: null           # 접촉 프로브: 주변 + 이 값 초과면 주의
+  probe_abs_limit_c: null       # 접촉 프로브: 이 값 이상이면 위험 (충전 차단)
+  ir_delta_c: null              # 적외선
+  ir_abs_limit_c: null
 
 pins:                           # BCM 번호. -1 이면 안 씀
   ssr: 17                       # (핀 11) AC 충전 라인 SSR

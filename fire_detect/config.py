@@ -17,6 +17,9 @@ class SensorConfig:
     ads1115_address: int = 0x48
     smoke_channel: int = 0          # ADS1115 A0
     smoke_divider: float = 1.5      # 10 kΩ / 20 kΩ 분압 -> AO = ADC 전압 x 1.5
+    mlx90614_address: int = 0x5A    # 적외선 온도계 (GY-906). -1 이면 안 씀
+    ds18b20_count: int = 3          # 접촉 온도 프로브 개수 (1-Wire, BCM 4). 0 이면 안 씀
+    ds18b20_ids: list = field(default_factory=list)   # 비우면 찾은 ID 순서. 위치를 고정하려면 ["28-...", ...]
     retry_s: float = 10.0            # 끊긴 센서 다시 연결 시도 간격 (열화상은 빨리 되찾아야 해서 짧게)
 
 
