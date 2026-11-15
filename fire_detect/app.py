@@ -1,17 +1,21 @@
 """
-app.py - 화재 감지기 본체 (ess_01). 1 초마다: 센서 읽기 -> 판정 -> 출력 -> 기록 -> (선택) ROS 2 발행
+app.py - 화재 감지기 본체 (ess_01). 1 초마다: 센서 읽기 -> 판정 -> 출력 -> 기록 -> (선택) ROS 2 발행, 서버 송신
 
     fire-detect --config /etc/fire-detect/config.yaml          # 실제 장비 (systemd 서비스로 상시 실행)
     fire-detect --simulate overheat --speed 50 --out /tmp/fire  # 하드웨어 없이 (가짜 센서, 가짜 출력)
     fire-detect --reset                                          # 위험 래치 해제 요청 (조건이 사라졌을 때만 풀림)
     fire-detect --config ... --ros                               # /fire/ess_01/status, /health/ess_01 발행
+    fire-detect --config ... --safe-off                          # 출력을 모두 끄고 끝냄 (systemd ExecStopPost)
 
-systemd 아래에서는 READY, WATCHDOG 신호를 보낸다. 루프가 멈추면 systemd 가 재시작하고,
-그동안 GPIO 가 풀려 충전이 끊긴다 (outputs.py 의 안전 쪽 설계).
+systemd 아래에서는 READY, WATCHDOG 신호를 보낸다. 루프가 멈추면 systemd 가 죽이고 다시 시작한다.
+Pi 5 커널은 프로세스가 죽어도 GPIO 출력을 그대로 두는 설정(pinctrl_rp1 persist_gpio_outputs)이 기본이라,
+서비스 파일이 시작 전에 그 설정을 끄고(ExecStartPre) 끝난 뒤 --safe-off 로 출력을 끈다(ExecStopPost).
+위험 래치는 latch_file 에 남겨 재시작, 재부팅 뒤에도 이어 간다.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import socket
@@ -24,6 +28,8 @@ from .alarm import FLAG_SIMULATED, FLAG_TIME_UNSYNCED, LEVEL_NAMES, AlarmEngine,
 from .config import Config, load
 from .drivers.ads1115 import ADS1115
 from .drivers.amg8833 import AMG8833
+from .drivers.ds18b20 import ProbeGroup
+from .drivers.mlx90614 import MLX90614
 from .drivers.sht31 import SHT31
 from .logger import FireLogger
 from .odor_json import record
@@ -51,8 +57,9 @@ def sd_notify(msg: str) -> None:
 class FireApp:
     def __init__(self, cfg: Config, hub: SensorHub, outputs, logger: FireLogger | None,
                  display=None, ros=None, clock=time.monotonic, wall=time.time, simulated=False,
-                 clock_synced=system_info.clock_synced, log=print):
+                 clock_synced=system_info.clock_synced, log=print, gpio_ok=True):
         self.cfg = cfg
+        self.gpio_ok = gpio_ok                     # 실제 장비인데 GPIO 를 못 열었으면 False (충전을 켤 수 없음)
         self.hub = hub
         self.outputs = outputs
         self.logger = logger
@@ -67,13 +74,51 @@ class FireApp:
         self.started = clock()
         self.last_health = -1e18
         self.last: Status | None = None
+        self.io_errors: dict[str, str] = {}
+        self.latch_path = Path(os.path.expanduser(cfg.latch_file)) if cfg.latch_file else None
+        self.latch_saved = False
+        if self.latch_path is not None and self._latch_exists(unknown=True):
+            self.engine.restore_latch()
+            self.latch_saved = True
+            log(f"재시작 전 위험 래치를 이어 감 ({self.latch_path}). 원인을 확인한 뒤 버튼 2 초 또는 fire-detect --reset")
+
+    def _latch_exists(self, unknown: bool) -> bool:
+        """래치 파일이 있나. 권한 문제 등으로 알 수 없으면 unknown (시작할 때는 True = 걸린 것으로 봄)"""
+        try:
+            return self.latch_path.exists()
+        except OSError:
+            return unknown
+
+    def _sync_latch(self, s: Status, stamp: float) -> None:
+        """위험 래치를 파일로 남기거나 지운다 (바뀔 때만 쓰므로 SD 카드에 부담 없음)"""
+        if self.latch_path is None or s.latched == self.latch_saved:
+            return
+        if s.latched:
+            def save():
+                self.latch_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.latch_path.with_suffix(".tmp")
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"since": record("x", stamp, "")["stamp"], "reason": s.reason},
+                                        ensure_ascii=False) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())                 # 걸린 직후 전원이 나가도 파일이 남게
+                tmp.replace(self.latch_path)
+                dfd = os.open(self.latch_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            self._safely("래치 기록", save)
+        else:
+            self._safely("래치 기록", lambda: self.latch_path.unlink(missing_ok=True))
+        self.latch_saved = self._latch_exists(unknown=self.latch_saved)
 
     # ------------------------------------------------------------------
     def health(self, stamp: float) -> dict:
         mask = self.hub.sensor_ok_mask
         warm = self.clock() - self.started < self.cfg.alarm.smoke_warmup_s
-        if not mask & OK_AMG8833 or (self.last is not None and self.last.fault):
-            state = STATE_ERROR                        # 열화상 없이는 감시 불가
+        if not self.gpio_ok or not mask & OK_AMG8833 or (self.last is not None and self.last.fault):
+            state = STATE_ERROR                        # GPIO 나 열화상 없이는 감시, 차단 불가
         elif warm:
             state = STATE_WARMUP
         elif mask == sum(s.bit for s in self.hub.slots.values()):
@@ -81,6 +126,8 @@ class FireApp:
         else:
             state = STATE_DEGRADED
         msg = self.hub.last_error
+        if not self.gpio_ok:
+            msg = "GPIO 출력을 열지 못함: 충전을 켤 수 없음 (차단 상태)" + (f" | {msg}" if msg else "")
         if self.last is not None and self.last.reason:
             msg = self.last.reason if not msg else f"{self.last.reason} | {msg}"
         return record("device_health", stamp, self.cfg.device_id, state=state,
@@ -90,6 +137,18 @@ class FireApp:
                       supply_v=system_info.supply_v() if not self.simulated else None,
                       cpu_temp_c=system_info.cpu_temp_c() if not self.simulated else None,
                       rssi_dbm=0, message=msg[:200])
+
+    def _safely(self, what: str, fn):
+        """부수 작업(기록, ROS)을 돌리고, 실패하면 처음 한 번과 내용이 바뀔 때만 알리고 넘어간다"""
+        try:
+            return fn()
+        except Exception as e:                                  # noqa: BLE001
+            msg = f"{what} 오류: {e}"
+            if self.io_errors.get(what) != msg:
+                self.io_errors[what] = msg
+                self.hub.last_error = msg
+                self.log(f"{msg} (판정과 차단은 계속함)")
+            return None
 
     def check_reset(self) -> bool:
         asked = self.outputs.reset_pressed()
@@ -116,22 +175,31 @@ class FireApp:
         if self.simulated:
             s.flags |= FLAG_SIMULATED
         self.outputs.apply(s)
+        self._sync_latch(s, stamp)
         prev = self.last
         self.last = s
         if prev is None or (prev.level, prev.latched, prev.fault) != (s.level, s.latched, s.fault):
+            points = ""
+            probes = [v for v in s.probe_c if v == v]
+            if probes:
+                points += f"프로브 최고 {max(probes):.1f}℃ "
+            if s.ir_object_c == s.ir_object_c:
+                points += f"적외선 {s.ir_object_c:.1f}℃ "
             self.log(f"[{LEVEL_NAMES[s.level]}{' 래치' if s.latched else ''}{' 감시불가' if s.fault else ''}] "
-                     f"최고 {s.surface_max_c:.1f}℃ 주변 {s.ambient_temp_c:.1f}℃ 연기 {s.smoke_v:.2f}V "
+                     f"최고 {s.surface_max_c:.1f}℃ 주변 {s.ambient_temp_c:.1f}℃ {points}연기 {s.smoke_v:.2f}V "
                      f"충전 {'허용' if s.charge_allowed else '차단'} {s.reason}")
-        rec = self.logger.write_status(stamp, s) if self.logger else None
+        # 기록, ROS 는 출력보다 뒤. 여기서 난 오류(디스크 가득, 권한, ROS)로 감시 루프가 멈추면 안 된다
+        rec = self._safely("기록", lambda: self.logger.write_status(stamp, s)) if self.logger else None
         if self.ros:
-            self.ros.publish(rec or record("fire_status", stamp, self.cfg.device_id, **s.fields()))
+            self._safely("ROS", lambda: self.ros.publish(rec or record("fire_status", stamp, self.cfg.device_id,
+                                                                         **s.fields())))
         if t - self.last_health >= self.cfg.health_period_s:
             self.last_health = t
             h = self.health(stamp)
             if self.logger:
-                self.logger.write_record(stamp, h)
+                self._safely("기록", lambda: self.logger.write_record(stamp, h))
             if self.ros:
-                self.ros.publish(h)
+                self._safely("ROS", lambda: self.ros.publish(h))
         if self.display:
             try:
                 self.display.show(s)
@@ -142,6 +210,7 @@ class FireApp:
 
     def close(self):
         self.outputs.close()
+        self.hub.close()
         if self.logger:
             self.logger.close()
         if self.display:
@@ -153,33 +222,81 @@ class FireApp:
             self.ros.close()
 
 
+# ------------------------------------------------------------------ 비상 끄기
+DEFAULT_CONFIG = "/etc/fire-detect/config.yaml"
+
+
+def safe_off(config_path: str | None, log=print, make_outputs=None) -> int:
+    """출력을 모두 끈 상태로 만들고 끝낸다 (systemd ExecStopPost: 감시 프로세스가 어떻게 끝났든 다음에 실행).
+
+    실제 설정 파일 없이는 핀을 건드리지 않는다: active_low 를 모르는 채 '끄기'를 하면 오히려 켤 수 있다.
+    (이때는 ExecStartPre 가 꺼 둔 persist_gpio_outputs 덕분에 출력이 이미 입력으로 풀려 있다)
+    참고: gpiozero(lgpio)는 핀을 출력으로 잡을 때 잠깐(수십 µs) Low 로 잡은 뒤 원하는 값을 쓴다.
+    active_low 출력(DC 릴레이)은 그 순간 켜짐 쪽이지만 기계식 릴레이는 반응하지 못하는 시간이다.
+    """
+    if config_path is None and os.path.exists(DEFAULT_CONFIG):
+        config_path = DEFAULT_CONFIG
+    if config_path is None:
+        log("safe-off: 설정 파일이 없어 핀을 건드리지 않음 (--config 필요)")
+        return 1
+    try:
+        cfg = load(config_path)
+    except Exception as e:                                      # noqa: BLE001
+        log(f"safe-off: 설정을 읽을 수 없어 핀을 건드리지 않음: {e}")
+        return 1
+    try:
+        if make_outputs is None:
+            from .outputs import GpioOutputs
+            make_outputs = GpioOutputs
+        outputs = make_outputs(cfg.pins)                        # 열 때 모든 출력이 꺼진 값으로 시작
+        outputs.close()                                         # 한 번 더 끄고 놓음
+    except Exception as e:                                      # noqa: BLE001
+        log(f"safe-off: 출력을 끄지 못함: {e}")
+        return 1
+    log("safe-off: 모든 출력 끔 (충전 차단)")
+    return 0
+
+
 # ------------------------------------------------------------------ 조립
-def build(cfg: Config, simulate: str | None, out: str | None, ros: bool, log=print):
+def build(cfg: Config, simulate: str | None, out: str | None, ros: bool, log=print, latch_file: str | None = None):
+    """latch_file: 시뮬레이션에서 래치 파일을 시험할 때만 준다. 안 주면 시뮬레이션은 래치를 남기지 않는다
+    (실제 장비의 /var/lib 파일을 건드리지 않고, 앞 시뮬레이션의 래치가 다음 실행으로 넘어가지 않게)"""
     sc = cfg.sensors
     scen = None
+    gpio_ok = True
     if simulate:
-        from .simulate import Scenario, make_bus
+        from .simulate import FakeW1, Scenario, make_bus
         scen = Scenario(simulate)
-        bus = make_bus(scen, sc.amg8833_address, sc.sht31_address, sc.ads1115_address, sc.smoke_divider)
+        cfg.latch_file = latch_file or ""
+        bus = make_bus(scen, sc.amg8833_address, sc.sht31_address, sc.ads1115_address, sc.smoke_divider,
+                       sc.mlx90614_address)
+        w1, threaded = FakeW1(scen), False                      # 가짜 1-Wire 는 바로 답하므로 스레드 없이
         clock = lambda: scen.t                                  # noqa: E731  가상 시계 (1 단계 = 1 초)
         start_wall = time.time()
         wall = lambda: start_wall + scen.t                      # noqa: E731
         outputs = FakeOutputs()
         sleep = lambda s: None                                  # noqa: E731
     else:
+        from .drivers.ds18b20 import W1Sysfs
         from .drivers.i2c_bus import SMBus2Bus
         bus = SMBus2Bus(cfg.i2c_bus)
+        w1, threaded = W1Sysfs(), True                          # 프로브 하나 읽는 데 0.75 초: 별도 스레드
         clock, wall, sleep = time.monotonic, time.time, time.sleep
         try:
             from .outputs import GpioOutputs
             outputs = GpioOutputs(cfg.pins)
         except Exception as e:                                  # gpiozero 없음, GPIO 접근 불가
-            log(f"GPIO 출력 없이 동작 (감시, 기록만): {e}")
+            log(f"GPIO 출력 없이 동작 (감시, 기록만, 충전은 켤 수 없음): {e}")
             outputs = FakeOutputs()
+            gpio_ok = False
 
+    probes = None
+    if sc.ds18b20_ids or sc.ds18b20_count > 0:
+        probes = ProbeGroup(w1, sc.ds18b20_ids, sc.ds18b20_count, threaded=threaded, clock=clock, log=log)
+    ir = MLX90614(bus, sc.mlx90614_address) if sc.mlx90614_address >= 0 else None
     hub = SensorHub(AMG8833(bus, sc.amg8833_address, sleep=sleep), SHT31(bus, sc.sht31_address, sleep=sleep),
                     ADS1115(bus, sc.ads1115_address, sleep=sleep), sc.smoke_channel, sc.smoke_divider,
-                    sc.retry_s, clock=clock, log=log)
+                    sc.retry_s, clock=clock, log=log, probes=probes, ir=ir)
     display = None
     if cfg.display.enabled and not simulate:
         try:
@@ -187,14 +304,26 @@ def build(cfg: Config, simulate: str | None, out: str | None, ros: bool, log=pri
             display = OledDisplay(cfg.i2c_bus, cfg.display.address)
         except Exception as e:
             log(f"OLED 표시 없이 동작: {e}")
-    logger = FireLogger(out or cfg.log.dir, cfg.device_id, cfg.log.jsonl_every_s, cfg.log.thermal, cfg.log.keep_days)
+    logger = FireLogger(out or cfg.log.dir, cfg.device_id, cfg.log.jsonl_every_s, cfg.log.thermal, cfg.log.keep_days,
+                        probe_count=probes.count if probes else 0, ir=ir is not None)
     bridge = None
     if ros:
         from .ros_bridge import RosBridge
         bridge = RosBridge(cfg.device_id)
+    if cfg.ingest.url and not simulate:                         # 시뮬레이션 기록은 서버로 보내지 않는다
+        from .http_bridge import HttpBridge, Tee
+        try:
+            with open(os.path.expanduser(cfg.ingest.token_file), encoding="utf-8") as f:
+                token = f.read().strip()
+        except OSError as e:                                    # 토큰이 없어도 감시는 시작한다
+            log(f"서버 송신 없이 동작 (토큰 파일을 못 읽음): {e}")
+        else:
+            http = HttpBridge(cfg.ingest.url, token, log=log)
+            log(f"서버 송신: {cfg.ingest.url}")
+            bridge = Tee(http, bridge) if bridge else http
     app = FireApp(cfg, hub, outputs, logger, display, bridge, clock=clock, wall=wall,
                   simulated=bool(simulate), clock_synced=(lambda: True) if simulate else system_info.clock_synced,
-                  log=log)
+                  log=log, gpio_ok=gpio_ok)
     return app, scen
 
 
@@ -234,17 +363,20 @@ def run(app: FireApp, scen, period_s: float, duration_s: float | None, speed: fl
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="fire-detect", description="소형 ESS 충전 과열 감시 (ess_01)")
     ap.add_argument("--config", help="설정 YAML (없으면 기본값)")
-    ap.add_argument("--simulate", choices=["overheat", "normal", "sensor_loss"], help="가짜 센서로 실행")
+    ap.add_argument("--simulate", choices=["overheat", "normal", "sensor_loss", "hidden_heat"], help="가짜 센서로 실행")
     ap.add_argument("--speed", type=float, default=1.0, help="시뮬레이션 배속 (0 = 기다리지 않음)")
     ap.add_argument("--duration", type=float, help="이 초만큼만 실행 (시뮬레이션은 가상 시간)")
     ap.add_argument("--reset-at", type=float, help="시뮬레이션에서 이 시각(초)에 래치 해제 버튼을 누름")
     ap.add_argument("--out", help="기록 폴더 (설정의 log.dir 대신)")
     ap.add_argument("--ros", action="store_true", help="ROS 2 로도 발행")
     ap.add_argument("--reset", action="store_true", help="실행 중인 감지기에 래치 해제 요청을 보내고 끝냄")
+    ap.add_argument("--safe-off", action="store_true", help="출력을 모두 끄고 끝냄 (systemd ExecStopPost 용)")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--version", action="version", version=f"fire_detect {__version__}")
     a = ap.parse_args(argv)
 
+    if a.safe_off:
+        return safe_off(a.config)
     cfg = load(a.config)
     if a.simulate:
         cfg.reset_file = str(Path(a.out or ".") / "reset.request")

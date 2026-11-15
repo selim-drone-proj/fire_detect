@@ -8,8 +8,11 @@ outputs.py - 판정 결과를 LED, 부저, SSR, DC 릴레이로 내보낸다.
   3 위험      -    -      켬      연속                 차단
   감시 불가   -    점멸   -       0.1 초 / 5 초        차단
 
-안전 쪽 설계: SSR 과 릴레이는 "통전해야 충전" 이다. 프로그램이 죽거나 Pi 전원이 나가면
-출력이 풀려 충전이 끊긴다. 시작할 때도 첫 판정 전까지는 끊긴 상태다.
+안전 쪽 설계: SSR 과 릴레이는 "통전해야 충전" 이다. 시작할 때 모든 출력은 꺼진 값으로 열고,
+켠 뒤 start_hold_s(10 초)는 판정이 차단을 유지한다. 끝날 때 close() 가 끈다.
+프로세스가 죽으면: Pi 5 커널은 놓인 GPIO 출력을 그대로 두는 것이 기본(persist_gpio_outputs)이라
+서비스 파일이 그 설정을 끄고(ExecStartPre), 끝난 뒤 fire-detect --safe-off 로 다시 끈다(ExecStopPost).
+Pi 전원이 나가면 출력이 풀려 충전이 끊긴다.
 """
 from __future__ import annotations
 

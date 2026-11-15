@@ -17,6 +17,9 @@ class SensorConfig:
     ads1115_address: int = 0x48
     smoke_channel: int = 0          # ADS1115 A0
     smoke_divider: float = 1.5      # 10 kΩ / 20 kΩ 분압 -> AO = ADC 전압 x 1.5
+    mlx90614_address: int = 0x5A    # 적외선 온도계 (GY-906). -1 이면 안 씀
+    ds18b20_count: int = 3          # 접촉 온도 프로브 개수 (1-Wire, BCM 4). 0 이면 안 씀
+    ds18b20_ids: list = field(default_factory=list)   # 비우면 찾은 ID 순서. 위치를 고정하려면 ["28-...", ...]
     retry_s: float = 10.0            # 끊긴 센서 다시 연결 시도 간격 (열화상은 빨리 되찾아야 해서 짧게)
 
 
@@ -50,17 +53,25 @@ class DisplayConfig:
 
 
 @dataclass
+class IngestConfig:
+    url: str = ""                   # 서버 수신 주소 (예: http://221.159.102.58:8070/api/ingest). "" 이면 안 보냄
+    token_file: str = "/etc/fire-detect/ingest_token"   # Bearer 토큰 한 줄. 권한 600
+
+
+@dataclass
 class Config:
     device_id: str = "ess_01"
     i2c_bus: int = 1
     period_s: float = 1.0
     health_period_s: float = 10.0
     reset_file: str = "/run/fire-detect/reset"     # 이 파일이 생기면 래치 해제 요청 (fire-detect --reset)
+    latch_file: str = "/var/lib/fire-detect/latched"   # 위험 래치를 남겨 재시작, 재부팅 뒤에도 이어 감. "" 이면 안 남김
     sensors: SensorConfig = field(default_factory=SensorConfig)
     alarm: AlarmConfig = field(default_factory=AlarmConfig)
     pins: PinConfig = field(default_factory=PinConfig)
     log: LogConfig = field(default_factory=LogConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    ingest: IngestConfig = field(default_factory=IngestConfig)
 
 
 def _build(cls, data: dict | None, where: str):
@@ -72,7 +83,7 @@ def _build(cls, data: dict | None, where: str):
     kw = {}
     for name, val in data.items():
         sub = {"sensors": SensorConfig, "alarm": AlarmConfig, "pins": PinConfig,
-               "log": LogConfig, "display": DisplayConfig}.get(name) if cls is Config else None
+               "log": LogConfig, "display": DisplayConfig, "ingest": IngestConfig}.get(name) if cls is Config else None
         kw[name] = _build(sub, val, f"{where}.{name}") if sub else val
     return cls(**kw)
 
